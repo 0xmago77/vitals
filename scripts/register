@@ -42,11 +42,16 @@ def main() -> int:
     ap.add_argument("--no-readme", action="store_true")
     ap.add_argument("--skip-url-check", action="store_true", help="do not GET the agentURI first")
     ap.add_argument("--force", action="store_true", help="register even if an agentId is recorded")
+    ap.add_argument("--record", type=int, metavar="AGENT_ID", default=None,
+                    help="send nothing: verify AGENT_ID on chain and record it (agent file + README)")
+    ap.add_argument("--tx", default=None, help="with --record: the registration tx hash to record")
     args = ap.parse_args()
 
     cfg = Config.from_env()
     uri = args.uri or cfg.registration_url
     agent_file = Path(args.agent_file)
+    if args.record is not None:
+        return record_existing(cfg, args, agent_file, uri)
     recorded = load_agent_file(agent_file).get("agentId")
     if recorded is not None and not args.force:
         print(f"already registered: agentId {recorded} recorded in {agent_file}; use --force to register again")
@@ -110,21 +115,44 @@ def main() -> int:
     txh = txh if isinstance(txh, str) else "0x" + bytes(txh).hex()
     print(json.dumps({"agentId": agent_id, "transactionHash": txh}))
 
+    record(cfg, agent_file, agent_id, account.address, uri, txh, None if args.no_readme else Path(args.readme))
+    return 0
+
+
+def record(cfg, agent_file: Path, agent_id: int, owner: str, uri: str, txh: str | None, readme: Path | None) -> None:
     rec = load_agent_file(agent_file)
-    rec.update({"agentId": agent_id, "chainId": cfg.chain_id, "owner": account.address,
-                "agentRegistry": f"eip155:{cfg.chain_id}:{cfg.identity_registry}", "agentURI": uri,
-                "registrationTx": txh})
+    rec.update({"agentId": agent_id, "chainId": cfg.chain_id, "owner": owner,
+                "agentRegistry": f"eip155:{cfg.chain_id}:{cfg.identity_registry}", "agentURI": uri})
+    if txh:
+        rec["registrationTx"] = txh
     agent_file.parent.mkdir(parents=True, exist_ok=True)
     agent_file.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
     print(f"recorded agentId {agent_id} in {agent_file}")
-    if not args.no_readme:
-        readme = Path(args.readme)
-        if readme.exists():
-            text = readme.read_text(encoding="utf-8")
-            new = README_RE.sub(f"Agent ID: {agent_id} · Chain: BNB Smart Chain mainnet (56) · Registry: "
-                                f"{cfg.identity_registry}", text)
-            readme.write_text(new, encoding="utf-8")
-            print(f"updated {readme}")
+    if readme is not None and readme.exists():
+        text = readme.read_text(encoding="utf-8")
+        new = README_RE.sub(f"Agent ID: {agent_id} · Chain: BNB Smart Chain mainnet (56) · Registry: "
+                            f"{cfg.identity_registry}", text)
+        readme.write_text(new, encoding="utf-8")
+        print(f"updated {readme}")
+
+
+def record_existing(cfg, args, agent_file: Path, uri: str) -> int:
+    """--record: check ownerOf/tokenURI on chain, then write the agentId; sends nothing."""
+    from vitals.abi import encode_call_hex
+
+    pool = RpcPool(cfg.rpc_head, cfg.rpc_archive, timeout=cfg.rpc_timeout)
+    aid = int(args.record)
+    owner = to_checksum_address("0x" + pool.eth_call(cfg.identity_registry,
+                                                     encode_call_hex("ownerOf(uint256)", aid))[-40:])
+    (on_chain_uri,) = decode_result(["string"], pool.eth_call(cfg.identity_registry,
+                                                               encode_call_hex("tokenURI(uint256)", aid)))
+    print(json.dumps({"agentId": aid, "owner": owner, "tokenURI": on_chain_uri}))
+    if owner.lower() != cfg.owner.lower():
+        print(f"agent {aid} is owned by {owner}, not {cfg.owner}; nothing recorded", file=sys.stderr)
+        return 2
+    if on_chain_uri != uri:
+        print(f"warning: on-chain agentURI {on_chain_uri} differs from {uri}")
+    record(cfg, agent_file, aid, owner, on_chain_uri, args.tx, None if args.no_readme else Path(args.readme))
     return 0
 
 
