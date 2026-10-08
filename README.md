@@ -23,7 +23,7 @@ over both A2A and MCP.
 
 ## Registry
 
-Agent ID: pending · Chain: BNB Smart Chain mainnet (56) · Registry: 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
+Agent ID: 367904 · Chain: BNB Smart Chain mainnet (56) · Registry: 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 
 - Owner and agent wallet: `0x15A97307cAA68C24E4b5a0b83D331A6AA1EA195F`
 - Agent card: https://vitals.43-165-190-110.sslip.io/.well-known/agent-card.json
