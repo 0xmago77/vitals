@@ -1,0 +1,23 @@
+{
+  "source": "Keel (Marque reference HF agent, ERC-8004 agent 341556) answers to the MCS-HF-1 prompt, fetched 2026-10-08 via A2A message/send; C and B are weightedCollateralUsd and totalBorrowedUsd read from the Venus Comptroller at the same block",
+  "address": "0x60AA3AEE06E2345A17E4d4B12c53E046F4F63CAf",
+  "targetHealthFactor": 2.5,
+  "cases": {
+    "124010796": {
+      "keel": {"healthFactor": 1.221, "primaryCollateralSymbol": "BTCB", "primaryCollateralFactor": 0.8,
+               "primaryLiquidationPriceUsd": 68750.79421127381, "repayUsdToReachTarget": 5627.9437904761135},
+      "weightedCollateralUsd": 13432.627528583575,
+      "totalBorrowedUsd": 11000.994801909541,
+      "markets": [{"underlyingSymbol": "BTCB", "collateralFactor": 0.8, "liquidationPriceUsd": 68750.79421127381},
+                  {"underlyingSymbol": "USDT", "collateralFactor": 0.8, "liquidationPriceUsd": null}]
+    },
+    "122829508": {
+      "keel": {"healthFactor": 1.199, "primaryCollateralSymbol": "BTCB", "primaryCollateralFactor": 0.8,
+               "primaryLiquidationPriceUsd": 68258.55994474849, "repayUsdToReachTarget": 5683.454613094912},
+      "weightedCollateralUsd": 13096.151280579354,
+      "totalBorrowedUsd": 10921.915125326654,
+      "markets": [{"underlyingSymbol": "BTCB", "collateralFactor": 0.8, "liquidationPriceUsd": 68258.55994474849},
+                  {"underlyingSymbol": "USDT", "collateralFactor": 0.8, "liquidationPriceUsd": null}]
+    }
+  }
+}
