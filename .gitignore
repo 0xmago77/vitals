@@ -1,0 +1,36 @@
+# secrets and local state: never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+keystore/
+keystores/
+*.keystore
+*keystore*.json
+.dev/
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# virtualenvs and caches
+.venv/
+.venv*/
+venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+node_modules/
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
