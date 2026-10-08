@@ -29,6 +29,8 @@ Agent ID: 367904 · Chain: BNB Smart Chain mainnet (56) · Registry: 0x8004A169F
 - Agent card: https://vitals.43-165-190-110.sslip.io/.well-known/agent-card.json
 - ERC-8004 registration file (the on-chain `agentURI`): https://vitals.43-165-190-110.sslip.io/.well-known/agent-registration.json
 - Source: https://github.com/0xmago77/vitals
+- Listed on Marque: https://marque.trade/agents/56/367904 (health factor category; MCS-HF-1 passed live on 2026-10-08, conformance result 11265)
+- Listed on Mandate: https://www.mandatemarkets.com (category Health Factor Monitoring, listed 2026-10-08)
 
 ## Pricing
 
