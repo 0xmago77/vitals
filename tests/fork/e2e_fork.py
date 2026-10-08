@@ -472,7 +472,7 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
     k.cfg.live = True
 
     # Open: collateral sized so the first 3 USDT borrow lands at HF ~2.0.
-    (mkt,) = [call(COMPTROLLER, "markets(address)", m["vBNB"], types=("bool", "uint256"))]
+    mkt = call(COMPTROLLER, "markets(address)", m["vBNB"], types=("bool", "uint256", "bool", "uint256", "uint256", "uint256", "bool"))
     cf = Decimal(mkt[1]) / Decimal(10**18)
     collateral = (Decimal(2) * Decimal(3) / (cf * Decimal(p_bnb) / Decimal(10**18))).quantize(Decimal("0.000001"))
     opened = k.open_position(collateral, Decimal("2.0"))
@@ -529,7 +529,7 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
         refusals["repay above balance"] = str(exc)
     k.guard.cap_wei = 1  # gas price cap
     try:
-        k._send(m["vBNB"], bytes.fromhex(encode_call_hex("mint()")[2:]), value=10**12, label="cap test",
+        k._send(m["vBNB"], bytes.fromhex(encode_call_hex("mint()")[2:]), value=10**15, label="cap test",
                 expect_zero_return=False)
         raise AssertionError("tx above the gas cap was sent")
     except WriteRefused as exc:
@@ -537,7 +537,7 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
     k.guard.cap_wei = cfg.gas_price_cap_wei
     rpc("anvil_setBalance", [agent.address, hex(2_000_100_000_000_000)])  # 0.0020001 BNB
     try:
-        k._send(m["vBNB"], bytes.fromhex(encode_call_hex("mint()")[2:]), value=10**12, label="reserve test",
+        k._send(m["vBNB"], bytes.fromhex(encode_call_hex("mint()")[2:]), value=10**15, label="reserve test",
                 expect_zero_return=False)
         raise AssertionError("tx below the BNB reserve was sent")
     except WriteRefused as exc:
