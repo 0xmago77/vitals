@@ -37,92 +37,71 @@ BORROW_TOPIC = "0x" + keccak(text="Borrow(address,uint256,uint256,uint256)").hex
 
 # Receipt scanning is spread over providers that serve eth_getBlockReceipts (8 Oct 2026).
 RECEIPT_RPCS = ("https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com", "https://bsc.blockrazor.xyz")
+MINT_TOPIC = "0x" + keccak(text="Mint(address,uint256,uint256,uint256)").hex()
+REDEEM_TOPIC = "0x" + keccak(text="Redeem(address,uint256,uint256,uint256)").hex()
+TRANSFER_TOPIC = "0x" + keccak(text="Transfer(address,address,uint256)").hex()
 SELECTORS = {"0x" + keccak(text=s).hex()[:8] for s in (
     "borrow(uint256)", "repayBorrow(uint256)", "repayBorrow()", "mint(uint256)", "mint()", "redeem(uint256)",
     "redeemUnderlying(uint256)")}
 
 
-def recent_borrowers(pool, cfg, want: int, window: int = 1000, max_windows: int = 6) -> list[str]:
-    """Accounts from recent Venus Borrow events; falls back to scanning recent blocks for
-    calls into vTokens when public nodes refuse eth_getLogs."""
+def recent_borrowers(pool, cfg, want: int, blocks: int = 40000) -> list[str]:
+    """Recent Venus borrowers. Borrow events are sparse (a few per hour on the busiest markets),
+    so candidates are every account seen in recent vToken events of the busiest markets (Borrow
+    first, then Mint / Redeem / repay / Transfer participants), kept only if they owe something
+    now (one multicall of borrowBalanceStored over those markets)."""
     (r,) = multicall(pool, cfg.multicall, [Call(cfg.comptroller, "getAllMarkets()", (), ("address[]",))], "latest")
     markets = [to_checksum_address(m) for m in r.value[0]]
-    head = pool.block_number()
-    seen: list[str] = []
-    to_block = head
-    # Cheapest first: one market at a time (public nodes refuse multi-address filters), busiest
-    # markets first, 2000-block windows walking back from the head.
     syms = multicall(pool, cfg.multicall, [Call(m, "symbol()", (), ("string",)) for m in markets], "latest")
     by_sym = {x.value[0]: m for m, x in zip(markets, syms) if x.success}
-    busiest = [by_sym[s] for s in ("vUSDT", "vUSDC", "vBNB", "vBTC", "vETH", "vFDUSD", "vWBNB") if s in by_sym]
+    busiest = [by_sym[s] for s in ("vUSDT", "vUSDC", "vBNB", "vBTC", "vETH", "vFDUSD", "vWBNB", "vUSD1", "vSOL", "vXVS")
+               if s in by_sym]
     from vitals.rpc import RpcPool
 
-    logs_pool = RpcPool(cfg.rpc_logs, timeout=20, retries=1)
+    logs_pool = RpcPool(cfg.rpc_logs, timeout=25, retries=1)
+    head = pool.block_number()
+    from_borrow: list[str] = []
+    others: list[str] = []
+
+    def add(lst, word_or_topic: str):
+        a = to_checksum_address("0x" + word_or_topic[-40:])
+        if a != CASE and int(a, 16) > 0xFFFF and a not in from_borrow and a not in others and a not in markets:
+            lst.append(a)
+
     for market in busiest:
-        end = head
-        for _ in range(8):
-            try:
-                logs = logs_pool.get_logs_range(market, [BORROW_TOPIC], end - 1999, end, window=2000, min_window=25)
-            except Exception as exc:
-                print(f"{market}: getLogs failed ({str(exc)[:60]})", file=sys.stderr)
-                break
-            for log in reversed(logs):
-                who = to_checksum_address("0x" + log["data"][2 + 24 : 2 + 64])
-                if who != CASE and who not in seen:
-                    seen.append(who)
-            end -= 2000
-            if len(seen) >= want * 2:
-                print(f"{len(seen)} borrowers from Borrow events (single-market log queries)", file=sys.stderr)
-                return seen
-    if len(seen) >= want:
-        return seen
-    try:
-        for _ in range(max_windows):
-            frm = to_block - window + 1
-            logs = pool.get_logs_range(markets, [BORROW_TOPIC], frm, to_block, window=window, min_window=200)
-            for log in reversed(logs):
-                borrower = to_checksum_address("0x" + log["data"][2 + 24 : 2 + 64])
-                if borrower != CASE and borrower not in seen:
-                    seen.append(borrower)
-            if len(seen) >= want * 2:
-                return seen
-            to_block = frm - 1
-    except Exception as exc:
-        print(f"eth_getLogs unavailable ({str(exc)[:80]}); scanning blocks instead", file=sys.stderr)
-    # Borrow events read from block receipts (eth_getBlockReceipts works on public nodes
-    # that refuse eth_getLogs), newest block first.
-    from concurrent.futures import ThreadPoolExecutor
-
-    lower = {m.lower() for m in markets}
-    from vitals.rpc import RpcPool
-
-    spread = [RpcPool([u], timeout=20, retries=1) for u in RECEIPT_RPCS]
-
-    def borrowers_in(b: int) -> list[str]:
-        out = []
-        p = spread[b % len(spread)]
         try:
-            receipts = p.call("eth_getBlockReceipts", [hex(b)])
-        except Exception:
-            receipts = spread[(b + 1) % len(spread)].call("eth_getBlockReceipts", [hex(b)])
-        for rc in receipts or []:
-            for lg in rc.get("logs", []):
-                if lg["topics"] and lg["topics"][0] == BORROW_TOPIC and lg["address"].lower() in lower:
-                    out.append(to_checksum_address("0x" + lg["data"][2 + 24 : 2 + 64]))
-        return out
-
-    b = head
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        while len(seen) < want * 2 and b > head - 30_000:
-            batch = list(range(b, b - 30, -1))
-            for found in ex.map(borrowers_in, batch):
-                for who in found:
-                    if who != CASE and who not in seen:
-                        seen.append(who)
-            b -= 30
-            time.sleep(0.5)
-    print(f"{len(seen)} borrowers from Borrow events in blocks {b}..{head}", file=sys.stderr)
-    return seen
+            logs = logs_pool.get_logs_range(market, [], head - blocks, head, window=5000, min_window=25)
+        except Exception as exc:
+            print(f"{market}: getLogs failed ({str(exc)[:60]})", file=sys.stderr, flush=True)
+            continue
+        for lg in reversed(logs):
+            t0, data = lg["topics"][0], lg["data"][2:]
+            words = [data[i:i + 64] for i in range(0, len(data), 64)]
+            if t0 == BORROW_TOPIC and words:
+                add(from_borrow, words[0])
+            elif t0 in (MINT_TOPIC, REDEEM_TOPIC) and words:
+                add(others, words[0])
+            elif len(words) == 5:  # repay-style events: (payer, borrower, amount, accountBorrows, total)
+                add(others, words[1])
+            elif t0 == TRANSFER_TOPIC and len(lg["topics"]) == 3:
+                add(others, lg["topics"][1])
+                add(others, lg["topics"][2])
+    candidates = from_borrow + others
+    print(f"{len(from_borrow)} accounts from Borrow events, {len(others)} from other vToken events "
+          f"(last {blocks} blocks of {len(busiest)} markets)", file=sys.stderr, flush=True)
+    owing: list[str] = []
+    for i in range(0, len(candidates), 40):
+        chunk = candidates[i:i + 40]
+        calls = [Call(m, "borrowBalanceStored(address)", (a,), ("uint256",)) for a in chunk for m in busiest]
+        res = multicall(pool, cfg.multicall, calls, "latest")
+        for j, a in enumerate(chunk):
+            row = res[j * len(busiest):(j + 1) * len(busiest)]
+            if any(x.success and x.value[0] > 0 for x in row):
+                owing.append(a)
+        if len(owing) >= want * 2:
+            break
+    print(f"{len(owing)} of them owe something now", file=sys.stderr, flush=True)
+    return owing
 
 
 def check(pool, cfg, account: str, block: int | None) -> dict:

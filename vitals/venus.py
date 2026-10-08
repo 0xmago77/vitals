@@ -71,6 +71,11 @@ class RawMarket:
     is_listed: bool = True
     snapshot_error: int = 0
     markets_words: int = 3
+    # Core-pool values from markets(); cf_mantissa / lt_mantissa above are the EFFECTIVE values
+    # for this account (they differ only when the account is in a Venus E-mode pool).
+    core_cf_mantissa: int | None = None
+    core_lt_mantissa: int | None = None
+    factor_source: str = "core"
 
 
 @dataclass
@@ -90,6 +95,10 @@ class RawAccount:
     bp_shortfall: int | None = None
     rpc_hosts: list[str] = field(default_factory=list)
     assets_in: list[str] = field(default_factory=list)
+    pool_id: int = 0
+    pool_label: str | None = None
+    pool_active: bool | None = None
+    pool_fallback: bool | None = None
 
 
 # --------------------------------------------------------------------- reader
@@ -139,6 +148,8 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
         Call(comptroller, sig["borrowing_power"][0], (account,), sig["borrowing_power"][1]),
         Call(comptroller, sig["all_markets"][0], (), sig["all_markets"][1]),
         Call(comptroller, sig["vai_controller"][0], (), sig["vai_controller"][1]),
+        # Venus E-mode: the account's pool (0 = core). Absent before E-mode existed.
+        Call(comptroller, "userPoolId(address)", (account,), ("uint96",)),
     ])
     if not r1[0].success or not r1[1].success:
         raise EngineError("the Venus Comptroller could not be read at this block")
@@ -148,6 +159,7 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
     bp = r1[3].value if r1[3].success else None
     all_markets = [to_checksum_address(a) for a in r1[4].value[0]] if r1[4].success else list(assets_in)
     vai_ctrl = to_checksum_address(r1[5].value[0]) if r1[5].success and int(r1[5].value[0], 16) != 0 else None
+    pool_id = int(r1[6].value[0]) if len(r1) > 6 and r1[6].success else 0
 
     # Snapshots for every listed market, so a borrow in a market that is not in
     # getAssetsIn (should not happen on Venus, but costs nothing to check) is seen.
@@ -175,9 +187,20 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
         + [Call(oracle, "getUnderlyingPrice(address)", (v,), ("uint256",)) for v in interesting]
         + [Call(v, "symbol()") for v in interesting]
         + [Call(v, "underlying()", (), ("address",)) for v in interesting]
+        + ([Call(comptroller, "poolMarkets(uint96,address)", (pool_id, v)) for v in interesting]
+           + [Call(comptroller, "pools(uint96)", (pool_id,))] if pool_id else [])
     )
     n = len(interesting)
-    r_markets, r_prices, r_vsym, r_under = r3[:n], r3[n : 2 * n], r3[2 * n : 3 * n], r3[3 * n :]
+    r_markets, r_prices, r_vsym, r_under = r3[:n], r3[n : 2 * n], r3[2 * n : 3 * n], r3[3 * n : 4 * n]
+    r_pool = r3[4 * n : 5 * n] if pool_id else []
+    pool_label = pool_active = pool_fallback = None
+    if pool_id and r3[5 * n].success:
+        pw = _words(r3[5 * n].raw)
+        pool_active, pool_fallback = bool(pw[1]), bool(pw[2])
+        try:
+            (pool_label, _, _) = decode_result(["string", "bool", "bool"], r3[5 * n].raw)
+        except Exception:
+            pool_label = None
     underlyings: list[str] = []
     for res in r_under:
         underlyings.append(to_checksum_address(res.value[0]) if res.success and res.value else NATIVE)
@@ -203,6 +226,16 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
             if dec is None:
                 raise EngineError(f"decimals() unreadable for underlying {u}")
         err, vbal, borrow, xrate = (int(x) for x in snaps[v])
+        core_cf, core_lt = words[1], (words[3] if len(words) >= 4 else None)
+        cf_eff, lt_eff, source = core_cf, core_lt, "core"
+        if pool_id and pool_active is not False:
+            pm = _words(r_pool[i].raw) if r_pool and r_pool[i].success else []
+            if len(pm) >= 4 and pm[0]:
+                cf_eff, lt_eff, source = pm[1], pm[3], f"e-mode pool {pool_id}"
+            elif not pool_fallback:
+                cf_eff, lt_eff, source = 0, 0, f"e-mode pool {pool_id} (not listed, no core fallback)"
+            else:
+                source = f"core (fallback from e-mode pool {pool_id})"
         markets.append(RawMarket(
             vtoken=v,
             vsymbol=_decode_symbol(r_vsym[i].raw) or "v???",
@@ -214,11 +247,14 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
             borrow_balance=borrow,
             exchange_rate=xrate,
             price=int(r_prices[i].value[0]),
-            cf_mantissa=words[1],
-            lt_mantissa=words[3] if len(words) >= 4 else None,
+            cf_mantissa=cf_eff,
+            lt_mantissa=lt_eff,
             is_listed=bool(words[0]),
             snapshot_error=err,
             markets_words=len(words),
+            core_cf_mantissa=core_cf,
+            core_lt_mantissa=core_lt,
+            factor_source=source,
         ))
 
     blk = pool.get_block(block, purpose=purpose)
@@ -238,6 +274,10 @@ def read_account(pool, cfg, account: str, block_number: int | None = None) -> Ra
         bp_shortfall=int(bp[2]) if bp else None,
         rpc_hosts=hosts,
         assets_in=assets_in,
+        pool_id=pool_id,
+        pool_label=pool_label,
+        pool_active=pool_active,
+        pool_fallback=pool_fallback,
     )
 
 
@@ -378,6 +418,23 @@ def _rel(ours: Decimal, chain: Decimal, scale: Decimal) -> Decimal:
     return CTX.divide(diff, max(scale, Decimal("1e-18")))
 
 
+def comptroller_liquidity(raw: RawAccount, use_lt: bool) -> int:
+    """The Comptroller's own integer arithmetic (1e18-scaled USD, truncating like Exp math):
+    tokensToDenom = factor * exchangeRate / 1e18 * price / 1e18; collateral += tokensToDenom * vBalance / 1e18;
+    debt += price * borrowBalance / 1e18; debt += VAI repay amount. Returns collateral - debt."""
+    w = 10**18
+    coll = debt = 0
+    for m in raw.markets:
+        if not m.entered:
+            continue
+        factor = m.lt_mantissa if (use_lt and m.lt_mantissa is not None) else m.cf_mantissa
+        to_denom = ((factor * m.exchange_rate) // w) * m.price // w
+        coll += (to_denom * m.v_balance) // w
+        debt += (m.price * m.borrow_balance) // w
+    debt += raw.vai_debt
+    return coll - debt
+
+
 def reconcile(calc: Calc) -> dict[str, Any]:
     """Check the engine against the Comptroller's own arithmetic at the same block.
 
@@ -409,7 +466,14 @@ def reconcile(calc: Calc) -> dict[str, Any]:
         "oursCollateralFactorUsd": ours_cf,
         "relativeDiffCollateralFactor": rel_cf_vs_liq,
     })
-    liq_ok = rel_lt <= RECONCILE_TOLERANCE or rel_cf_vs_liq <= RECONCILE_TOLERANCE
+    # Exact integer replica of the Comptroller's arithmetic (should differ by 0 wei).
+    chain_wei = raw.liquidity - raw.shortfall
+    int_lt, int_cf = comptroller_liquidity(raw, True), comptroller_liquidity(raw, False)
+    out["integerReplica"] = {"accountLiquidityDiffWei": int_lt - chain_wei,
+                             "accountLiquidityDiffWeiCollateralFactor": int_cf - chain_wei}
+    rel_int_lt = _rel(D(int_lt), D(chain_wei), max(scale * WAD, Decimal(1)))
+    rel_int_cf_liq = _rel(D(int_cf), D(chain_wei), max(scale * WAD, Decimal(1)))
+    liq_ok = min(rel_lt, rel_cf_vs_liq, rel_int_lt, rel_int_cf_liq) <= RECONCILE_TOLERANCE
     out["accountLiquidityWeighting"] = ("liquidationThreshold" if rel_lt <= RECONCILE_TOLERANCE else
                                         "collateralFactor" if rel_cf_vs_liq <= RECONCILE_TOLERANCE else "none")
     out["weighting"] = out["accountLiquidityWeighting"]
@@ -417,7 +481,10 @@ def reconcile(calc: Calc) -> dict[str, Any]:
     if raw.bp_liquidity is not None and raw.bp_shortfall is not None:
         bp = CTX.divide(D(raw.bp_liquidity) - D(raw.bp_shortfall), WAD)
         rel_bp = _rel(ours_cf, bp, scale)
-        bp_ok = rel_bp <= RECONCILE_TOLERANCE
+        bp_wei = raw.bp_liquidity - raw.bp_shortfall
+        out["integerReplica"]["borrowingPowerDiffWei"] = int_cf - bp_wei
+        rel_int_bp = _rel(D(int_cf), D(bp_wei), max(scale * WAD, Decimal(1)))
+        bp_ok = min(rel_bp, rel_int_bp) <= RECONCILE_TOLERANCE
         out.update({"borrowingPowerMinusShortfallUsd": bp, "relativeDiffBorrowingPowerCollateralFactor": rel_bp})
     out["matches"] = bool(liq_ok and bp_ok)
     return out
@@ -464,6 +531,9 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
             "collateralUsd": _f(m.collateral_usd),
             "collateralFactor": _f(m.cf),
             "liquidationThreshold": _f(m.lt),
+            "factorSource": m.raw.factor_source,
+            "coreCollateralFactor": None if m.raw.core_cf_mantissa is None else _f(CTX.divide(D(m.raw.core_cf_mantissa), WAD)),
+            "coreLiquidationThreshold": None if m.raw.core_lt_mantissa is None else _f(CTX.divide(D(m.raw.core_lt_mantissa), WAD)),
             "weightedCollateralUsd": _f(m.weighted_cf_usd),
             "borrowed": _f(m.borrowed),
             "borrowedUsd": _f(m.debt_usd),
@@ -578,6 +648,9 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
             "perAsset": per_asset_repay,
             "collateralTopUpAlternative": topups,
         },
+        "eMode": {"poolId": raw.pool_id, "label": raw.pool_label, "active": raw.pool_active,
+                  "allowCorePoolFallback": raw.pool_fallback,
+                  "note": "factors come from Comptroller.poolMarkets(poolId, vToken) when poolId > 0"},
         "markets": markets_out,
         "reconciliation": {k: (_f(v) if isinstance(v, Decimal) else v) for k, v in recon.items()},
         "provenance": {
