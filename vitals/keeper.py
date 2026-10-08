@@ -25,7 +25,7 @@ from typing import Any
 from eth_utils import keccak, to_checksum_address
 
 from .abi import Call, decode_result, encode_call, encode_call_hex, multicall
-from .chain import GasGuard, WriteRefused, pool_web3
+from .chain import WRITE_LOCK, GasGuard, WriteRefused, pool_web3, reset_sdk_nonces
 from .rpc import RpcPool, RpcRevert
 from .venus import CTX, compute, read_account
 
@@ -258,10 +258,18 @@ class Keeper:
         g = self.guard.check(sender, gas, value_wei=value)
         if not self.live:
             return {"dryRun": True, "label": label, "gas": gas, "gasPriceWei": g["gasPriceWei"], "simulated": True}
+        with WRITE_LOCK:
+            try:
+                return self._sign_send_wait(to, data, value, gas, g["gasPriceWei"], label)
+            finally:
+                reset_sdk_nonces(sender)
+
+    def _sign_send_wait(self, to: str, data: bytes, value: int, gas: int, gas_price: int, label: str) -> dict:
+        sender = self.address
         nonce = int(self.write_pool.call("eth_getTransactionCount", [sender, "pending"]), 16)
         chain_id = int(self.pool.call("eth_chainId"), 16)
         signed = self.account.sign_transaction({
-            "to": to_checksum_address(to), "data": data, "value": value, "gas": gas, "gasPrice": g["gasPriceWei"],
+            "to": to_checksum_address(to), "data": data, "value": value, "gas": gas, "gasPrice": gas_price,
             "nonce": nonce, "chainId": chain_id,
         })
         raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")

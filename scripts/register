@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Register Vitals on the ERC-8004 IdentityRegistry (BSC, chain 56) with the bnbagent SDK.
+
+    python scripts/register                      dry run: prints the transaction and simulates it
+    VITALS_LIVE=1 python scripts/register --send sends it (both are required)
+
+agentURI = the registration file URL (https://<base>/.well-known/agent-registration.json).
+After a successful send the agentId is written to config/agent.json (which the
+server serves in the card and the registration file) and to README.md.
+Refuses to register twice: if an agentId is already recorded it stops unless --force.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import requests  # noqa: E402
+from eth_utils import to_checksum_address  # noqa: E402
+
+from vitals.abi import decode_result  # noqa: E402
+from vitals.chain import GasGuard, load_account, network_config, sdk_wallet  # noqa: E402
+from vitals.config import AGENT_FILE, Config, load_agent_file  # noqa: E402
+from vitals.rpc import RpcPool  # noqa: E402
+
+README_RE = re.compile(r"Agent ID: (?:pending|\d+) · Chain: BNB Smart Chain mainnet \(56\) · Registry: 0x[0-9a-fA-F]{40}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--send", action="store_true", help="broadcast (also needs VITALS_LIVE=1)")
+    ap.add_argument("--uri", default=None, help="agentURI (default: the registration file URL)")
+    ap.add_argument("--agent-file", default=str(AGENT_FILE), help="where to record the agentId")
+    ap.add_argument("--readme", default=str(ROOT / "README.md"))
+    ap.add_argument("--no-readme", action="store_true")
+    ap.add_argument("--skip-url-check", action="store_true", help="do not GET the agentURI first")
+    ap.add_argument("--force", action="store_true", help="register even if an agentId is recorded")
+    args = ap.parse_args()
+
+    cfg = Config.from_env()
+    uri = args.uri or cfg.registration_url
+    agent_file = Path(args.agent_file)
+    recorded = load_agent_file(agent_file).get("agentId")
+    if recorded is not None and not args.force:
+        print(f"already registered: agentId {recorded} recorded in {agent_file}; use --force to register again")
+        return 0
+    rpc = (cfg.rpc_write or cfg.rpc_head)
+    pool = RpcPool(rpc, cfg.rpc_archive, timeout=cfg.rpc_timeout)
+    chain_id = int(pool.call("eth_chainId"), 16)
+    if chain_id != cfg.chain_id:
+        print(f"RPC serves chain {chain_id}, expected {cfg.chain_id}", file=sys.stderr)
+        return 2
+
+    if not args.skip_url_check:
+        r = requests.get(uri, timeout=20)
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if r.status_code != 200 or body.get("name") != "Vitals" or "services" not in body:
+            print(f"agentURI {uri} does not serve the Vitals registration file (http {r.status_code})", file=sys.stderr)
+            return 2
+        print(f"agentURI OK: {uri} (type {body.get('type')})")
+
+    account = load_account(cfg)
+    sender = account.address if account else to_checksum_address(cfg.owner)
+    if account and account.address.lower() != cfg.owner.lower():
+        print(f"warning: signing key address {account.address} differs from VITALS_OWNER {cfg.owner}")
+
+    from bnbagent.erc8004.constants import BUILT_WITH_KEY, get_built_with_value
+    from web3 import Web3
+
+    metadata = [(BUILT_WITH_KEY, get_built_with_value().encode("utf-8"))]
+    w3 = Web3(Web3.HTTPProvider(rpc[0]))
+    registry = w3.eth.contract(address=to_checksum_address(cfg.identity_registry), abi=[{
+        "type": "function", "name": "register", "stateMutability": "nonpayable",
+        "inputs": [{"name": "agentURI", "type": "string"},
+                   {"name": "metadata", "type": "tuple[]", "components": [
+                       {"name": "metadataKey", "type": "string"}, {"name": "metadataValue", "type": "bytes"}]}],
+        "outputs": [{"name": "agentId", "type": "uint256"}]}])
+    fn = registry.functions.register(uri, metadata)
+    data = fn._encode_transaction_data()
+    sim = pool.call("eth_call", [{"from": sender, "to": cfg.identity_registry, "data": data}, "latest"])
+    (would_be_id,) = decode_result(["uint256"], sim)
+    gas = int(pool.call("eth_estimateGas", [{"from": sender, "to": cfg.identity_registry, "data": data}]), 16)
+    tx = {"chainId": chain_id, "from": sender, "to": to_checksum_address(cfg.identity_registry), "value": 0,
+          "gasEstimate": gas, "data": data, "agentURI": uri, "metadata": {BUILT_WITH_KEY: get_built_with_value()}}
+    print(json.dumps({"transaction": tx, "simulation": {"agentId": would_be_id}}, indent=2))
+
+    live = os.environ.get("VITALS_LIVE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not (args.send and live):
+        print("dry run: nothing sent (pass --send with VITALS_LIVE=1 to broadcast)")
+        return 0
+    if account is None:
+        print("VITALS_KEY_FILE is required to send", file=sys.stderr)
+        return 2
+    guard = GasGuard(pool, cfg.gas_price_cap_wei, cfg.bnb_reserve_wei, live=True)
+    print("gas check:", guard.check(account.address, int(gas * 1.3)))
+
+    from bnbagent.erc8004 import ERC8004Agent
+
+    sdk = ERC8004Agent(wallet_provider=sdk_wallet(account), network=network_config(cfg))
+    result = sdk.contract.register_agent(agent_uri=uri)
+    agent_id = int(result["agentId"])
+    txh = result.get("transactionHash")
+    txh = txh if isinstance(txh, str) else "0x" + bytes(txh).hex()
+    print(json.dumps({"agentId": agent_id, "transactionHash": txh}))
+
+    rec = load_agent_file(agent_file)
+    rec.update({"agentId": agent_id, "chainId": cfg.chain_id, "owner": account.address,
+                "agentRegistry": f"eip155:{cfg.chain_id}:{cfg.identity_registry}", "agentURI": uri,
+                "registrationTx": txh})
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    agent_file.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    print(f"recorded agentId {agent_id} in {agent_file}")
+    if not args.no_readme:
+        readme = Path(args.readme)
+        if readme.exists():
+            text = readme.read_text(encoding="utf-8")
+            new = README_RE.sub(f"Agent ID: {agent_id} · Chain: BNB Smart Chain mainnet (56) · Registry: "
+                                f"{cfg.identity_registry}", text)
+            readme.write_text(new, encoding="utf-8")
+            print(f"updated {readme}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

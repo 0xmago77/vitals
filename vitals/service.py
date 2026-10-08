@@ -15,9 +15,10 @@ from .venus import EngineError, health_report
 
 
 class HFService:
-    def __init__(self, cfg, pool, *, cache_size: int = 256):
+    def __init__(self, cfg, pool, *, cache_size: int = 256, db=None):
         self.cfg = cfg
         self.pool = pool
+        self.db = db
         self._cache: OrderedDict[tuple, dict] = OrderedDict()
         self._lock = threading.Lock()
         self._cache_size = cache_size
@@ -43,6 +44,12 @@ class HFService:
         if task.block_number is not None:
             key = (task.address, task.block_number, str(task.target_health_factor))
             hit = self._cached(key)
+            if hit is None and self.db is not None:
+                # Reports at a fixed block never change: a persisted copy keeps old blocks
+                # answerable when public archive nodes throttle us.
+                hit = self.db.get(_db_key(key))
+                if hit is not None:
+                    self._store(key, dict(hit))
             if hit is not None:
                 return {**hit, "input": task.echo(), "cached": True}
         started = time.monotonic()
@@ -55,6 +62,8 @@ class HFService:
             report["assumptions"] = []
         if key is not None:
             self._store(key, dict(report))  # callers (the seller) add fields to what they get back
+            if self.db is not None:
+                self.db.put(_db_key(key), report)
         self.served += 1
         return report
 
@@ -71,6 +80,10 @@ class HFService:
         except (RpcUnavailable, RpcError) as exc:
             return False, refusal(f"BNB Smart Chain RPC unavailable, retry shortly ({type(exc).__name__})",
                                   inputs=task.echo(), retryable=True)
+
+
+def _db_key(key: tuple) -> str:
+    return "hf:" + ":".join(str(k).lower() for k in key)
 
 
 def refusal(reason: str, needs: str | None = None, *, inputs: dict | None = None,

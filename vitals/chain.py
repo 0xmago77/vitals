@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import logging
 import secrets
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,22 @@ log = logging.getLogger("vitals.chain")
 
 class WriteRefused(Exception):
     """A guard refused a transaction before it was sent."""
+
+
+# One signer, two writers (seller and keeper) in one process: serialise every send.
+WRITE_LOCK = threading.RLock()
+
+
+def reset_sdk_nonces(address: str) -> None:
+    """After a tx sent outside the SDK, make its nonce managers re-read 'pending'."""
+    try:
+        from bnbagent.core.nonce_manager import NonceManager
+    except ImportError:  # pragma: no cover
+        return
+    with NonceManager._class_lock:
+        managers = [nm for (_, acct), nm in NonceManager._instances.items() if acct.lower() == address.lower()]
+    for nm in managers:
+        nm.reset()
 
 
 # ------------------------------------------------------------------ key file

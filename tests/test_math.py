@@ -113,7 +113,9 @@ def test_health_factor_is_cf_weighted_collateral_over_debt():
     assert report["weightedCollateralUsd"] == 48_100.0
     assert report["totalDebtUsd"] == report["totalBorrowedUsd"] == 20_000.0
     assert report["status"] == "healthy"
-    assert report["liquidityUsd"] == 28_100.0 and report["shortfallUsd"] == 0.0
+    # Venus' liquidity is liquidation-threshold weighted; borrowing power is CF weighted.
+    assert report["liquidityUsd"] == 31_100.0 and report["shortfallUsd"] == 0.0
+    assert report["borrowingPowerUsd"] == 28_100.0
 
 
 def test_health_factor_rounds_to_three_decimals_half_up():
@@ -455,10 +457,11 @@ def test_reconcile_one_wei_is_within_tolerance():
 
 
 def test_reconcile_detects_liquidation_threshold_weighting():
-    # Chain liquidity equal to the LT-weighted value (51000 - 20000).
+    # Chain liquidity equal to the LT-weighted value (51000 - 20000): what getAccountLiquidity
+    # returns on BSC since Venus added liquidation thresholds.
     rec = reconcile(compute(recon_account(D(31_000))))
-    assert rec["matches"] is False
-    assert rec["weighting"] == "liquidationThreshold"
+    assert rec["matches"] is True
+    assert rec["weighting"] == rec["accountLiquidityWeighting"] == "liquidationThreshold"
     assert rec["relativeDiffLiquidationThreshold"] == 0
 
 
@@ -466,21 +469,25 @@ def test_reconcile_shortfall_side():
     raw = account([market("BTCB", 18, "60000", supplied="1", cf="0.8"), market("USDT", 18, "1", borrowed="50000")],
                   liquidity=0, shortfall=usd_wad(D(2000)))
     rec = reconcile(compute(raw))
-    assert rec["chainLiquidityMinusShortfallUsd"] == D(-2000)
-    assert rec["liquidityUsd"] == 0
+    assert rec["chainLiquidityMinusShortfallUsd"] == rec["accountLiquidityMinusShortfallUsd"] == D(-2000)
     assert rec["matches"] is True
 
 
 def test_reconcile_unavailable_and_borrowing_power():
-    assert reconcile(compute(recon_account(None))) == {
-        "method": "Comptroller.getAccountLiquidity(account) at the same block", "available": False}
-    raw = recon_account(D(28_000))
-    raw.bp_liquidity, raw.bp_shortfall = usd_wad(D(31_000)), 0
+    rec0 = reconcile(compute(recon_account(None)))
+    assert rec0["available"] is False and rec0["matches"] is False
+    # getAccountLiquidity = LT-weighted (31000), getBorrowingPower = CF-weighted (28000): both hold.
+    raw = recon_account(D(31_000))
+    raw.bp_liquidity, raw.bp_shortfall = usd_wad(D(28_000)), 0
     rec = reconcile(compute(raw))
-    assert rec["borrowingPowerMinusShortfallUsd"] == D(31_000)
+    assert rec["borrowingPowerMinusShortfallUsd"] == D(28_000)
+    assert rec["relativeDiffBorrowingPowerCollateralFactor"] == 0
     report = roundtrip(build_report(compute(raw), D(2)))
     assert report["reconciliation"]["matches"] is True
-    assert report["reconciliation"]["relativeDiffCollateralFactor"] == 0.0
+    assert report["reconciliation"]["relativeDiffLiquidationThreshold"] == 0.0
+    # A borrowing power that disagrees with the CF-weighted sum fails the reconciliation.
+    raw.bp_liquidity = usd_wad(D(31_000))
+    assert reconcile(compute(raw))["matches"] is False
 
 
 # ------------------------------------------------- MCS-HF-1 reference fixture

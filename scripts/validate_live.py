@@ -5,8 +5,9 @@
 2. At least N other real Venus borrowers, taken from recent vToken Borrow
    events, at the latest block.
 
-For every account the engine's sum(collateralUSD*CF) - sum(debtUSD) must equal
-Comptroller.getAccountLiquidity's liquidity - shortfall to <= 1e-9 relative.
+For every account: sum(collateralUSD*LT) - debt must equal getAccountLiquidity (liquidity - shortfall)
+and sum(collateralUSD*CF) - debt must equal getBorrowingPower, each
+to <= 1e-9 relative (Venus weights liquidation by LT and borrowing by CF).
 Prints a table and writes JSON evidence with --out.
 
     .venv312/bin/python scripts/validate_live.py --count 12 --out .dev/evidence/live.json
@@ -34,22 +35,67 @@ CASE = "0x60AA3AEE06E2345A17E4d4B12c53E046F4F63CAf"
 BORROW_TOPIC = "0x" + keccak(text="Borrow(address,uint256,uint256,uint256)").hex()
 
 
-def recent_borrowers(pool, cfg, want: int, window: int = 1000, max_windows: int = 40) -> list[str]:
+# Receipt scanning is spread over providers that serve eth_getBlockReceipts (8 Oct 2026).
+RECEIPT_RPCS = ("https://bsc-rpc.publicnode.com", "https://bsc.rpc.blxrbdn.com", "https://bsc.blockrazor.xyz")
+SELECTORS = {"0x" + keccak(text=s).hex()[:8] for s in (
+    "borrow(uint256)", "repayBorrow(uint256)", "repayBorrow()", "mint(uint256)", "mint()", "redeem(uint256)",
+    "redeemUnderlying(uint256)")}
+
+
+def recent_borrowers(pool, cfg, want: int, window: int = 1000, max_windows: int = 6) -> list[str]:
+    """Accounts from recent Venus Borrow events; falls back to scanning recent blocks for
+    calls into vTokens when public nodes refuse eth_getLogs."""
     (r,) = multicall(pool, cfg.multicall, [Call(cfg.comptroller, "getAllMarkets()", (), ("address[]",))], "latest")
     markets = [to_checksum_address(m) for m in r.value[0]]
     head = pool.block_number()
     seen: list[str] = []
     to_block = head
-    for _ in range(max_windows):
-        frm = to_block - window + 1
-        logs = pool.get_logs_range(markets, [BORROW_TOPIC], frm, to_block, window=window)
-        for log in reversed(logs):
-            borrower = to_checksum_address("0x" + log["data"][2 + 24 : 2 + 64])
-            if borrower != CASE and borrower not in seen:
-                seen.append(borrower)
-        if len(seen) >= want * 2:
-            break
-        to_block = frm - 1
+    try:
+        for _ in range(max_windows):
+            frm = to_block - window + 1
+            logs = pool.get_logs_range(markets, [BORROW_TOPIC], frm, to_block, window=window, min_window=200)
+            for log in reversed(logs):
+                borrower = to_checksum_address("0x" + log["data"][2 + 24 : 2 + 64])
+                if borrower != CASE and borrower not in seen:
+                    seen.append(borrower)
+            if len(seen) >= want * 2:
+                return seen
+            to_block = frm - 1
+    except Exception as exc:
+        print(f"eth_getLogs unavailable ({str(exc)[:80]}); scanning blocks instead", file=sys.stderr)
+    # Borrow events read from block receipts (eth_getBlockReceipts works on public nodes
+    # that refuse eth_getLogs), newest block first.
+    from concurrent.futures import ThreadPoolExecutor
+
+    lower = {m.lower() for m in markets}
+    from vitals.rpc import RpcPool
+
+    spread = [RpcPool([u], timeout=20, retries=1) for u in RECEIPT_RPCS]
+
+    def borrowers_in(b: int) -> list[str]:
+        out = []
+        p = spread[b % len(spread)]
+        try:
+            receipts = p.call("eth_getBlockReceipts", [hex(b)])
+        except Exception:
+            receipts = spread[(b + 1) % len(spread)].call("eth_getBlockReceipts", [hex(b)])
+        for rc in receipts or []:
+            for lg in rc.get("logs", []):
+                if lg["topics"] and lg["topics"][0] == BORROW_TOPIC and lg["address"].lower() in lower:
+                    out.append(to_checksum_address("0x" + lg["data"][2 + 24 : 2 + 64]))
+        return out
+
+    b = head
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        while len(seen) < want * 2 and b > head - 30_000:
+            batch = list(range(b, b - 30, -1))
+            for found in ex.map(borrowers_in, batch):
+                for who in found:
+                    if who != CASE and who not in seen:
+                        seen.append(who)
+            b -= 30
+            time.sleep(0.5)
+    print(f"{len(seen)} borrowers from Borrow events in blocks {b}..{head}", file=sys.stderr)
     return seen
 
 
@@ -67,6 +113,8 @@ def check(pool, cfg, account: str, block: int | None) -> dict:
         "vaiDebtUsd": float(calc.vai_debt_usd),
         "relCF": float(rec["relativeDiffCollateralFactor"]),
         "relLT": float(rec["relativeDiffLiquidationThreshold"]),
+        "relBorrowingPowerCF": float(rec.get("relativeDiffBorrowingPowerCollateralFactor", float("nan"))),
+        "accountLiquidityWeighting": rec.get("accountLiquidityWeighting"),
         "matches": bool(rec["matches"]),
         "collateralWithCfNotEqualLt": lt_differs,
         "markets": [m.raw.underlying_symbol for m in calc.markets if m.raw.entered],
@@ -99,11 +147,12 @@ def main() -> int:
             continue
         rows.append({"group": "recent-borrower", **row})
         done += 1
-    print(f"{'group':16} {'account':44} {'block':>10} {'HF(CF)':>10} {'HF(LT)':>10} {'relDiff':>10} ok  CF!=LT  markets")
+    print(f"{'group':16} {'account':44} {'block':>10} {'HF(CF)':>10} {'HF(LT)':>10} {'relLiqLT':>10} {'relBpCF':>10} ok  CF!=LT  markets")
     for r in rows:
         print(f"{r['group']:16} {r['account']:44} {r['block']:>10} {str(round(r['hf'], 4) if r['hf'] else None):>10} "
               f"{str(round(r['hfLiquidationThreshold'], 4) if r['hfLiquidationThreshold'] else None):>10} "
-              f"{r['relCF']:>10.1e} {'Y' if r['matches'] else 'N'}   {'Y' if r['collateralWithCfNotEqualLt'] else '-'}     "
+              f"{r['relLT']:>10.1e} {r['relBorrowingPowerCF']:>10.1e} {'Y' if r['matches'] else 'N'}   "
+              f"{'Y' if r['collateralWithCfNotEqualLt'] else '-'}     "
               f"{','.join(r['markets'])[:60]}")
     others = [r for r in rows if r["group"] == "recent-borrower"]
     ok = all(r["matches"] for r in rows) and len(others) >= min(10, args.count)

@@ -28,15 +28,23 @@ VENUS_COMPTROLLER = "0xfD36E2c2a6789Db23113685031d7F16329158384"
 MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
 CAMPAIGN_WALLET = "0x15A97307cAA68C24E4b5a0b83D331A6AA1EA195F"
 
+# Public BSC endpoints measured from this host on 8 Oct 2026. All bsc-dataseed* hosts share one
+# backend and rate-limit by IP (HTTP 403 for a while after a burst), so the head pool spreads
+# across providers; failing endpoints cool down and the next one answers.
 DEFAULT_HEAD_RPCS = (
     "https://bsc-dataseed.bnbchain.org,"
+    "https://bsc-rpc.publicnode.com,"
+    "https://bsc.rpc.blxrbdn.com,"
     "https://bsc-dataseed1.bnbchain.org,"
-    "https://bsc-dataseed2.bnbchain.org,"
+    "https://bsc.blockrazor.xyz,"
     "https://bsc-mainnet.public.blastapi.io"
 )
+# Historical state without a key: blastapi (both case blocks), 1rpc (recent history, daily quota).
 DEFAULT_ARCHIVE_RPCS = "https://bsc-mainnet.public.blastapi.io,https://1rpc.io/bnb"
-# eth_getLogs: bsc-dataseed refuses it, 1rpc caps the range at 50 blocks, publicnode serves 5000.
-DEFAULT_LOGS_RPCS = "https://bsc-rpc.publicnode.com,https://1rpc.io/bnb,https://bsc-mainnet.public.blastapi.io"
+# eth_getLogs: dataseed refuses it; publicnode serves 5000 blocks, bloXroute serves it, blockrazor
+# caps at 25 blocks, 1rpc at 50 (the pool shrinks its window until a node accepts).
+DEFAULT_LOGS_RPCS = ("https://bsc-rpc.publicnode.com,https://bsc.rpc.blxrbdn.com,https://bsc.blockrazor.xyz,"
+                     "https://1rpc.io/bnb,https://bsc-mainnet.public.blastapi.io")
 
 
 def _env(name: str, default: str) -> str:
@@ -113,6 +121,7 @@ class Config:
     keeper_idle_hours: Decimal = Decimal("20")
 
     rate_limit_per_minute: int = 60
+    warm_cache: bool = True
     github_url: str = "https://github.com/0xmago77/vitals"
 
     @property
@@ -200,4 +209,5 @@ class Config:
             keeper_maintenance_min=dec("VITALS_KEEPER_MAINTENANCE_MIN", "0.01"),
             keeper_idle_hours=dec("VITALS_KEEPER_IDLE_HOURS", "20"),
             rate_limit_per_minute=int(_env("VITALS_RATE_LIMIT_PER_MINUTE", "60")),
+            warm_cache=_env_bool("VITALS_WARM_CACHE", True),
         )

@@ -260,6 +260,7 @@ class MarketCalc:
     liquidation_price: Decimal | None = None
     liquidation_direction: str | None = None
     liquidation_price_collateral_only: Decimal | None = None
+    liquidation_price_lt: Decimal | None = None
 
 
 @dataclass
@@ -326,6 +327,19 @@ def compute(raw: RawAccount) -> Calc:
             if p > 0:
                 m.liquidation_price_collateral_only = p
 
+    # The same closed form with liquidation thresholds: the price at which Venus itself would
+    # let the account be liquidated (getAccountLiquidity shortfall > 0).
+    l0_lt = weighted_lt - total_debt
+    for m in ms:
+        if not m.raw.entered or total_debt <= 0:
+            continue
+        lt_m = m.lt if m.lt is not None else m.cf
+        coeff = CTX.multiply(m.supplied, lt_m) - m.borrowed
+        if coeff != 0:
+            p_star = m.price_usd - CTX.divide(l0_lt, coeff)
+            if p_star > 0:
+                m.liquidation_price_lt = p_star
+
     # Primary collateral, as MCS-HF-1 defines it: the entered market with the
     # largest supplied USD among those with a positive collateral factor
     # (stable order, so ties keep getAssetsIn order).
@@ -357,38 +371,55 @@ def topup_to_target(weighted: Decimal, debt: Decimal, target: Decimal, cf: Decim
     return x if x > 0 else ZERO
 
 
+def _rel(ours: Decimal, chain: Decimal, scale: Decimal) -> Decimal:
+    diff = abs(ours - chain)
+    if chain != 0:
+        return CTX.divide(diff, abs(chain))
+    return CTX.divide(diff, max(scale, Decimal("1e-18")))
+
+
 def reconcile(calc: Calc) -> dict[str, Any]:
+    """Check the engine against the Comptroller's own arithmetic at the same block.
+
+    Measured on BSC (8 Oct 2026, accounts holding collateral whose CF != LT):
+      getAccountLiquidity(a) == sum(collateralUSD * liquidationThreshold) - debt  (the liquidation rule)
+      getBorrowingPower(a)   == sum(collateralUSD * collateralFactor)     - debt  (the borrowing rule)
+    Before Venus added liquidation thresholds both were collateral-factor based; the
+    engine then uses CF for both weightings and the two identities coincide.
+    """
     raw = calc.raw
-    out: dict[str, Any] = {"method": "Comptroller.getAccountLiquidity(account) at the same block"}
+    out: dict[str, Any] = {"method": "Comptroller.getAccountLiquidity and getBorrowingPower at the same block",
+                           "tolerance": RECONCILE_TOLERANCE}
     if raw.liquidity is None or raw.shortfall is None:
-        out.update({"available": False})
+        out.update({"available": False, "matches": False})
         return out
+    scale = max(calc.weighted_cf, calc.weighted_lt, calc.total_debt)
     chain = CTX.divide(D(raw.liquidity) - D(raw.shortfall), WAD)
-
-    def rel(ours: Decimal) -> Decimal:
-        diff = abs(ours - chain)
-        denom = max(abs(chain), calc.weighted_cf, calc.total_debt, Decimal("1e-18"))
-        return CTX.divide(diff, abs(chain)) if chain != 0 else CTX.divide(diff, denom)
-
-    rel_cf = rel(calc.weighted_cf - calc.total_debt)
-    rel_lt = rel(calc.weighted_lt - calc.total_debt)
+    ours_cf = calc.weighted_cf - calc.total_debt
+    ours_lt = calc.weighted_lt - calc.total_debt
+    rel_lt = _rel(ours_lt, chain, scale)
+    rel_cf_vs_liq = _rel(ours_cf, chain, scale)
     out.update({
         "available": True,
         "error": raw.liquidity_error,
-        "liquidityUsd": chain if chain > 0 else ZERO,
+        "accountLiquidityMinusShortfallUsd": chain,
         "chainLiquidityMinusShortfallUsd": chain,
-        "oursCollateralFactorUsd": calc.weighted_cf - calc.total_debt,
-        "relativeDiffCollateralFactor": rel_cf,
-        "oursLiquidationThresholdUsd": calc.weighted_lt - calc.total_debt,
+        "oursLiquidationThresholdUsd": ours_lt,
         "relativeDiffLiquidationThreshold": rel_lt,
-        "tolerance": RECONCILE_TOLERANCE,
-        "matches": rel_cf <= RECONCILE_TOLERANCE,
-        "weighting": "collateralFactor" if rel_cf <= RECONCILE_TOLERANCE else
-        ("liquidationThreshold" if rel_lt <= RECONCILE_TOLERANCE else "none"),
+        "oursCollateralFactorUsd": ours_cf,
+        "relativeDiffCollateralFactor": rel_cf_vs_liq,
     })
+    liq_ok = rel_lt <= RECONCILE_TOLERANCE or rel_cf_vs_liq <= RECONCILE_TOLERANCE
+    out["accountLiquidityWeighting"] = ("liquidationThreshold" if rel_lt <= RECONCILE_TOLERANCE else
+                                        "collateralFactor" if rel_cf_vs_liq <= RECONCILE_TOLERANCE else "none")
+    out["weighting"] = out["accountLiquidityWeighting"]
+    bp_ok = True
     if raw.bp_liquidity is not None and raw.bp_shortfall is not None:
         bp = CTX.divide(D(raw.bp_liquidity) - D(raw.bp_shortfall), WAD)
-        out["borrowingPowerMinusShortfallUsd"] = bp
+        rel_bp = _rel(ours_cf, bp, scale)
+        bp_ok = rel_bp <= RECONCILE_TOLERANCE
+        out.update({"borrowingPowerMinusShortfallUsd": bp, "relativeDiffBorrowingPowerCollateralFactor": rel_bp})
+    out["matches"] = bool(liq_ok and bp_ok)
     return out
 
 
@@ -443,6 +474,7 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
             "liquidationPriceMovePct": _f(((m.liquidation_price - m.price_usd) / m.price_usd * 100)
                                           if m.liquidation_price is not None and m.price_usd > 0 else None),
             "liquidationPriceCollateralOnly": _f(m.liquidation_price_collateral_only),
+            "liquidationPriceLiquidationThreshold": _f(m.liquidation_price_lt),
             "raw": {
                 "vTokenBalance": str(m.raw.v_balance),
                 "borrowBalance": str(m.raw.borrow_balance),
@@ -481,13 +513,15 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
                 topups.append({"underlyingSymbol": m.raw.underlying_symbol, "vToken": m.raw.vtoken,
                                "usd": _f(x), "tokens": _f(CTX.divide(x, m.price_usd))})
 
-    distance = None
+    distance = distance_cf = None
+    if calc.hf_lt is not None and calc.hf_lt > 0:
+        distance = max(ZERO, (ONE - CTX.divide(ONE, calc.hf_lt)) * 100)
     if hf is not None and hf > 0:
-        distance = max(ZERO, (ONE - CTX.divide(ONE, hf)) * 100)
+        distance_cf = max(ZERO, (ONE - CTX.divide(ONE, hf)) * 100)
 
     if hf is None:
         status = "no_debt" if has_position else "no_position"
-    elif hf < 1:
+    elif (calc.hf_lt if calc.hf_lt is not None else hf) < 1:
         status = "liquidatable"
     elif hf < Decimal("1.1"):
         status = "at_risk"
@@ -515,7 +549,10 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
         "status": status,
         "hasPosition": has_position,
         "healthFactorExact": _s(hf),
-        "healthFactorDefinition": "sum(collateralUSD * collateralFactor) / sum(debtUSD); entered markets only; VAI debt at 1 USD",
+        "healthFactorDefinition": ("sum(collateralUSD * collateralFactor) / sum(debtUSD) over entered markets, VAI "
+                                   "debt at 1 USD (the MCS-HF-1 definition; matches getBorrowingPower). Venus "
+                                   "liquidates on the liquidation-threshold variant, healthFactorLiquidationThreshold "
+                                   "(matches getAccountLiquidity)."),
         "healthFactorLiquidationThreshold": _f(calc.hf_lt, 6),
         "totalCollateralUsd": _f(calc.total_collateral),
         "weightedCollateralUsd": _f(calc.weighted_cf),
@@ -524,9 +561,15 @@ def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None =
         "totalBorrowedUsd": _f(calc.total_debt),
         "vaiDebtUsd": _f(calc.vai_debt_usd),
         "unenteredDebtUsd": _f(calc.unentered_debt_usd),
-        "liquidityUsd": _f(max(ZERO, calc.weighted_cf - calc.total_debt)),
-        "shortfallUsd": _f(max(ZERO, calc.total_debt - calc.weighted_cf)),
+        # Venus' own liquidity / shortfall (getAccountLiquidity: liquidation-threshold weighted).
+        "liquidityUsd": _f(max(ZERO, calc.weighted_lt - calc.total_debt)),
+        "shortfallUsd": _f(max(ZERO, calc.total_debt - calc.weighted_lt)),
+        # Borrowing headroom (getBorrowingPower: collateral-factor weighted).
+        "borrowingPowerUsd": _f(max(ZERO, calc.weighted_cf - calc.total_debt)),
+        # % fall in collateral value that makes the account liquidatable (LT-weighted HF reaches 1).
         "distanceToLiquidationPct": _f(distance, 4),
+        # % fall in collateral value that brings the reported (CF-weighted) healthFactor to 1.
+        "distanceToHealthFactorOnePct": _f(distance_cf, 4),
         "repayToTarget": {
             "targetHealthFactor": _f(target),
             "usd": _f(repay),

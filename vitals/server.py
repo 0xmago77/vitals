@@ -18,7 +18,7 @@ from . import ENGINE_NAME, ENGINE_VERSION, __version__
 from .a2a import A2AHandler, rpc_error
 from .card import CATEGORY, DESCRIPTION, NAME, TAGLINE, agent_card, price_atomic, registration_file
 from .chain import load_account
-from .config import Config
+from .config import Config, load_agent_file
 from .db import DB
 from .keeper import Keeper
 from .mcp import MCPHandler
@@ -82,7 +82,7 @@ class App:
         self.write_pool = write_pool or RpcPool(cfg.rpc_write or cfg.rpc_head, cfg.rpc_archive,
                                                 logs=cfg.rpc_logs, timeout=cfg.rpc_timeout, retries=cfg.rpc_retries)
         self.db = DB(cfg.db_path)
-        self.hf = HFService(cfg, self.pool)
+        self.hf = HFService(cfg, self.pool, db=self.db)
         self.account = load_account(cfg)
         self.seller = Seller(cfg, self.pool, self.db, self.hf, self.account, write_pool=self.write_pool)
         self.keeper = Keeper(cfg, self.pool, self.db, self.account, write_pool=self.write_pool)
@@ -96,11 +96,18 @@ class App:
 
     # ------------------------------------------------------------ helpers
 
+    def agent_id(self) -> int | None:
+        """VITALS_AGENT_ID, else config/agent.json (re-read, so scripts/register needs no restart)."""
+        if self.cfg.agent_id is not None:
+            return self.cfg.agent_id
+        raw = load_agent_file().get("agentId")
+        return int(raw) if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()) else None
+
     def info(self) -> dict:
         return {
             "name": NAME, "tagline": TAGLINE, "category": CATEGORY, "version": __version__,
             "engine": {"name": ENGINE_NAME, "version": ENGINE_VERSION},
-            "agentId": self.cfg.agent_id, "chainId": self.cfg.chain_id,
+            "agentId": self.agent_id(), "chainId": self.cfg.chain_id,
             "agentRegistry": f"eip155:{self.cfg.chain_id}:{self.cfg.identity_registry}",
             "owner": self.cfg.owner, "provider": self.seller.address,
             "price": {"amount": str(self.cfg.price_u), "currency": "U", "token": self.cfg.payment_token,
@@ -140,7 +147,8 @@ class App:
             return jresp({**self.info(), "description": DESCRIPTION, "endpoints": self.endpoints(),
                           "jobs": jobs, "keeper": _keeper_brief(status), "uptimeSeconds": int(time.time() - self.started)})
         e = html.escape
-        agent = "pending" if self.cfg.agent_id is None else str(self.cfg.agent_id)
+        aid = self.agent_id()
+        agent = "pending" if aid is None else str(aid)
         hf = status.get("healthFactor")
         acts = "".join(
             f"<li>{time.strftime('%Y-%m-%d %H:%M', time.gmtime(a['ts']))} UTC: {e(a['action'])} {e(a['amount'] or '')}"
@@ -176,11 +184,11 @@ Comptroller.getAccountLiquidity.</p></section></body></html>"""
         return web.Response(text=ICON, content_type="image/svg+xml", headers={"Cache-Control": "max-age=86400"})
 
     async def card(self, request: web.Request) -> web.Response:
-        return jresp(agent_card(self.cfg, provider_address=self.seller.address),
+        return jresp(agent_card(self.cfg, agent_id=self.agent_id(), provider_address=self.seller.address),
                      headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=60"})
 
     async def registration(self, request: web.Request) -> web.Response:
-        return jresp(registration_file(self.cfg), headers={"Access-Control-Allow-Origin": "*"})
+        return jresp(registration_file(self.cfg, agent_id=self.agent_id()), headers={"Access-Control-Allow-Origin": "*"})
 
     async def health(self, request: web.Request) -> web.Response:
         return jresp({"ok": True, "name": NAME, "version": __version__, "uptimeSeconds": int(time.time() - self.started),
@@ -353,8 +361,18 @@ Comptroller.getAccountLiquidity.</p></section></body></html>"""
                 log.warning("keeper loop failed: %s", exc)
             await asyncio.sleep(60)
 
+    async def warm_cache(self) -> None:
+        """Pre-compute the MCS-HF-1 case blocks so the conformance test never waits on an archive node."""
+        from .card import EXAMPLE_ADDRESS
+        for block in (124010796, 122829508):
+            try:
+                await self.blocking(self.hf.answer, None, {"address": EXAMPLE_ADDRESS, "blockNumber": block,
+                                                           "targetHealthFactor": 2.5})
+            except Exception as exc:  # best effort
+                log.warning("cache warm-up for block %s failed: %s", block, exc)
+
     async def on_startup(self, app: web.Application) -> None:
-        self._tasks = []
+        self._tasks = [asyncio.create_task(self.warm_cache())] if self.cfg.chain_id == 56 and self.cfg.warm_cache else []
         if self.cfg.watch_enabled and self.seller.can_sign:
             self._tasks.append(asyncio.create_task(self.watcher_loop()))
         if self.cfg.keeper_enabled and self.account is not None:

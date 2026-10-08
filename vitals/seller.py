@@ -30,7 +30,7 @@ from eth_utils import keccak, to_checksum_address
 from . import ENGINE_NAME, ENGINE_VERSION, jobs as J
 from .abi import Call, encode_call_hex, multicall, topic_address
 from .card import price_atomic
-from .chain import GasGuard, WriteRefused, install_pool_web3, network_config, sdk_wallet
+from .chain import WRITE_LOCK, GasGuard, WriteRefused, install_pool_web3, network_config, sdk_wallet
 from .parse import TaskError, parse_task
 from .rpc import RpcPool
 from .storage import ContentStore
@@ -449,10 +449,11 @@ class Seller:
                 "blockNumber": report.get("blockNumber"), "content_type": "application/json",
                 "built_with": "https://github.com/bnb-chain/bnbagent-sdk",
             }
-            if path == "sdk":
-                res = asyncio.run(ops.submit_result(job_id, content, metadata=metadata))
-            else:
-                res = self.submit_direct(client, job_id, content, metadata)
+            with WRITE_LOCK:
+                if path == "sdk":
+                    res = asyncio.run(ops.submit_result(job_id, content, metadata=metadata))
+                else:
+                    res = self.submit_direct(client, job_id, content, metadata)
             if not res.get("success"):
                 self._fail(job_id, f"submit failed: {res.get('error')}",
                            permanent=res.get("error_code") in PERMANENT_CODES)
@@ -557,7 +558,8 @@ class Seller:
             try:
                 self.guard.check(self.address, 400_000)
                 client, _, _ = self.sdk()
-                res = client.settle(jid)
+                with WRITE_LOCK:
+                    res = client.settle(jid)
                 tx = res.get("transactionHash") if isinstance(res, dict) else None
                 tx = tx.hex() if hasattr(tx, "hex") and not isinstance(tx, str) else tx
                 self.db.upsert_job(jid, settle_tx=tx)
