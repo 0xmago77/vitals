@@ -50,8 +50,9 @@ COMMERCE = "0xea4daa3100a767e86fded867729ae7446476eba6"
 U_TOKEN = "0xcE24439F2D9C6a2289F741120FE202248B666666"
 REGISTRY = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
 CASE = "0x60AA3AEE06E2345A17E4d4B12c53E046F4F63CAf"
-ORACLE_SLOT = 4  # Comptroller storage slot of `oracle` (verified: holds ResilientOracle)
-MOCK_ORACLE = "0x00000000000000000000000000000000000c0de1"
+NATIVE_BNB = "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"  # ResilientOracle's key for BNB
+WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+PRICE_ORACLE = {"address": None}  # set to the Comptroller's ResilientOracle once replaced
 
 evidence: dict = {"steps": []}
 
@@ -116,24 +117,29 @@ def assemble(ops: list) -> bytes:
     return code
 
 
-def mock_oracle_code(original: str) -> bytes:
-    """getUnderlyingPrice(v): sload(v) if set, else the original oracle's answer; other selectors: STOP."""
+def pinned_oracle_code() -> bytes:
+    """Replacement code for the ResilientOracle on the fork: getUnderlyingPrice(x) and getPrice(x)
+    return sload(x) (revert when unset); every other selector (updatePrice...) is a no-op.
+    Venus reads the oracle both through the Comptroller and from other contracts directly, so
+    the oracle itself is replaced rather than the Comptroller's pointer."""
     return assemble([
-        ("PUSH", 1, 0), "CALLDATALOAD", ("PUSH", 1, 0xE0), "SHR", ("PUSH", 4, 0xFC57D4DF), "EQ",
-        ("PUSHL", "main"), "JUMPI", "STOP",
-        ("LABEL", "main"), ("PUSH", 1, 4), "CALLDATALOAD", "SLOAD", "DUP1", "ISZERO", ("PUSHL", "fwd"), "JUMPI",
+        ("PUSH", 1, 0), "CALLDATALOAD", ("PUSH", 1, 0xE0), "SHR", "DUP1", ("PUSH", 4, 0xFC57D4DF), "EQ",
+        ("PUSHL", "main"), "JUMPI", ("PUSH", 4, 0x41976E09), "EQ", ("PUSHL", "price"), "JUMPI", "STOP",
+        ("LABEL", "main"), "POP",
+        ("LABEL", "price"), ("PUSH", 1, 4), "CALLDATALOAD", "SLOAD", "DUP1", "ISZERO", ("PUSHL", "rev"), "JUMPI",
         ("PUSH", 1, 0), "MSTORE", ("PUSH", 1, 0x20), ("PUSH", 1, 0), "RETURN",
-        ("LABEL", "fwd"), "POP", "CALLDATASIZE", ("PUSH", 1, 0), ("PUSH", 1, 0), "CALLDATACOPY",
-        ("PUSH", 1, 0x20), ("PUSH", 1, 0), "CALLDATASIZE", ("PUSH", 1, 0), ("PUSH", 20, int(original, 16)), "GAS",
-        "STATICCALL", "ISZERO", ("PUSHL", "rev"), "JUMPI", ("PUSH", 1, 0x20), ("PUSH", 1, 0), "RETURN",
-        ("LABEL", "rev"), "RETURNDATASIZE", ("PUSH", 1, 0), ("PUSH", 1, 0), "RETURNDATACOPY", "RETURNDATASIZE",
-        ("PUSH", 1, 0), "REVERT",
+        ("LABEL", "rev"), ("PUSH", 1, 0), ("PUSH", 1, 0), "REVERT",
     ])
 
 
-def set_price(vtoken: str, price_mantissa: int) -> None:
-    slot = "0x" + int(vtoken, 16).to_bytes(32, "big").hex()
-    rpc("anvil_setStorageAt", [MOCK_ORACLE, slot, "0x" + price_mantissa.to_bytes(32, "big").hex()])
+def set_price(key: str, price_mantissa: int) -> None:
+    slot = "0x" + int(key, 16).to_bytes(32, "big").hex()
+    rpc("anvil_setStorageAt", [PRICE_ORACLE["address"], slot, "0x" + price_mantissa.to_bytes(32, "big").hex()])
+
+
+def set_bnb_price(vbnb: str, price_mantissa: int) -> None:
+    for k in (vbnb, NATIVE_BNB, WBNB):
+        set_price(k, price_mantissa)
 
 
 # ------------------------------------------------------------ token funding
@@ -179,7 +185,9 @@ def fork_env(agent_key: Path, agent_addr: str, extra: dict | None = None) -> dic
         "VITALS_KEY_FILE": str(agent_key), "VITALS_OWNER": agent_addr, "VITALS_LIVE": "1",
         "VITALS_DATA_DIR": str(DEV / "data"), "VITALS_PORT": str(SERVER_PORT), "VITALS_BASE_URL": BASE,
         "VITALS_WATCH_INTERVAL": "2", "VITALS_WARM_CACHE": "0", "VITALS_RPC_RETRIES": "1", "VITALS_RPC_TIMEOUT": "120",
-        "VITALS_GAS_PRICE_CAP_GWEI": "3", "VITALS_KEEPER": "0", "VITALS_RATE_LIMIT_PER_MINUTE": "1000",
+        # anvil reports ~3 gwei from eth_gasPrice on a BSC fork (mainnet: ~0.05-0.1 gwei); the cap itself
+        # is exercised separately in the keeper section.
+        "VITALS_GAS_PRICE_CAP_GWEI": "10", "VITALS_KEEPER": "0", "VITALS_RATE_LIMIT_PER_MINUTE": "1000",
     })
     env.update(extra or {})
     return env
@@ -203,13 +211,7 @@ def main() -> int:
         head = int(requests.post(args.fork_url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber",
                                                       "params": []}, timeout=20).json()["result"], 16)
         fork_block = head - 5
-        anvil = subprocess.Popen(
-            ["anvil", "--fork-url", args.fork_url, "--fork-block-number", str(fork_block), "--chain-id", "56",
-             "--port", str(ANVIL_PORT), "--retries", "20", "--fork-retry-backoff", "1500", "--timeout", "60000",
-             "--no-rate-limit", "--gas-price", "100000000", "--block-base-fee-per-gas", "50000000", "--silent"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        procs.append(anvil)
-        wait_for(lambda: _alive(), 60, "anvil")
+        procs.append(start_anvil(args.fork_url, fork_block))
         chain_id = int(rpc("eth_chainId"), 16)
         step("anvil fork up", forkUrlHost=args.fork_url.split("/")[2], forkBlock=fork_block, chainId=chain_id)
         assert chain_id == 56
@@ -252,6 +254,25 @@ def main() -> int:
         if not args.skip_commerce:
             commerce_flow(env, agent, buyer, agent_id, procs)
         if not args.skip_keeper:
+            if not args.skip_commerce:
+                # The commerce flow warped time by the 7-day review window, which leaves the real
+                # Venus oracle feeds stale; the keeper runs on a fresh fork of a newer block.
+                for p in reversed(procs):
+                    try:
+                        os.killpg(p.pid, signal.SIGTERM)
+                    except Exception:
+                        pass
+                procs.clear()
+                time.sleep(2)
+                head2 = int(requests.post(args.fork_url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber",
+                                                               "params": []}, timeout=20).json()["result"], 16)
+                procs.append(start_anvil(args.fork_url, head2 - 5))
+                rpc("anvil_setBalance", [agent.address, hex(5 * 10**18)])
+                (orig_oracle,) = call(COMPTROLLER, "oracle()", types=("address",))
+                for sym, v in (("vBNB", "0xA07c5b74C9B40447a954e1466938b865b6BBea36"),
+                               ("vUSDT", "0xfD5840Cd36d94D7229439859C0112a4185BC0255")):
+                    (prices[sym],) = call(orig_oracle, "getUnderlyingPrice(address)", v)
+                step("fresh fork for the keeper", forkBlock=head2 - 5, bnbUsd=prices["vBNB"] / 1e18)
             keeper_flow(env, agent, orig_oracle, prices)
         evidence["ok"] = True
         step("ALL FORK CHECKS PASSED")
@@ -272,6 +293,16 @@ def main() -> int:
                     os.killpg(p.pid, signal.SIGTERM)
                 except Exception:
                     pass
+
+
+def start_anvil(fork_url: str, block: int) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        ["anvil", "--fork-url", fork_url, "--fork-block-number", str(block), "--chain-id", "56",
+         "--port", str(ANVIL_PORT), "--retries", "20", "--fork-retry-backoff", "1500", "--timeout", "60000",
+         "--no-rate-limit", "--gas-price", "100000000", "--block-base-fee-per-gas", "50000000", "--silent"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    wait_for(lambda: _alive(), 60, "anvil")
+    return proc
 
 
 def _alive() -> bool:
@@ -449,18 +480,19 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
     m = k.markets()
     step("keeper markets discovered on chain", **m)
 
-    # Swap a pass-through mock oracle into the Comptroller so the BNB price can be moved. Both of
-    # the position's prices are pinned to their pre-warp values (real feeds go stale after warps).
-    rpc("anvil_setCode", [MOCK_ORACLE, "0x" + mock_oracle_code(orig).hex()])
-    rpc("anvil_setStorageAt", [COMPTROLLER, hex(ORACLE_SLOT), "0x" + int(MOCK_ORACLE, 16).to_bytes(32, "big").hex()])
-    (now_oracle,) = call(COMPTROLLER, "oracle()", types=("address",))
-    assert now_oracle.lower() == MOCK_ORACLE.lower()
+    # Replace the ResilientOracle's code with pinned prices (the real feeds stop updating on a fork
+    # and go stale as anvil's clock advances; Venus reads the oracle from several contracts).
+    PRICE_ORACLE["address"] = orig
+    rpc("anvil_setCode", [orig, "0x" + pinned_oracle_code().hex()])
     p_bnb = prices["vBNB"]
-    set_price(m["vBNB"], p_bnb)
+    set_bnb_price(m["vBNB"], p_bnb)
     set_price(m["vUSDT"], prices["vUSDT"])
-    (got,) = call(MOCK_ORACLE, "getUnderlyingPrice(address)", m["vBNB"])
-    assert got == p_bnb
-    step("mock oracle installed in Comptroller slot 4 (prices pinned)", original=orig, bnbUsd=p_bnb / 1e18)
+    set_price(m["USDT"], prices["vUSDT"])
+    (got,) = call(orig, "getUnderlyingPrice(address)", m["vBNB"])
+    (got2,) = call(orig, "getPrice(address)", m["USDT"])
+    assert got == p_bnb and got2 == prices["vUSDT"]
+    step("ResilientOracle replaced by pinned prices on the fork", oracle=orig, bnbUsd=p_bnb / 1e18,
+         usdtUsd=prices["vUSDT"] / 1e18)
 
     # Dry run changes nothing.
     k.cfg.live = False
@@ -490,17 +522,17 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
         return out
 
     # Price drop -> HF < 1.85 -> repay to 2.0.
-    set_price(m["vBNB"], p_bnb * 88 // 100)
+    set_bnb_price(m["vBNB"], p_bnb * 88 // 100)
     out = cycle("BNB -12% -> repay to target", "repay")
     assert abs(out["hfAfter"] - 2.0) < 0.02
     # Price rise -> HF > 2.15 -> borrow back (capped, HF after >= 1.9).
-    set_price(m["vBNB"], p_bnb * 112 // 100)
+    set_bnb_price(m["vBNB"], p_bnb * 112 // 100)
     out = cycle("BNB +12% -> borrow back to target", "borrow")
     assert out["hfAfter"] >= 1.9
     # Inside the band: no action while the last tx is recent.
     s, _ = k.state()
     target_price = int(Decimal(p_bnb * 112 // 100) * Decimal(2) / s.hf)
-    set_price(m["vBNB"], target_price)
+    set_bnb_price(m["vBNB"], target_price)
     out = k.cycle()
     assert out["decision"] == "none", out
     step("keeper cycle: inside band, recent tx -> no action", reason=out["reason"])
@@ -552,7 +584,7 @@ def keeper_flow(env: dict, agent, orig: str, prices: dict) -> None:
         db._conn.execute("UPDATE keeper_actions SET ts = ts - ?", (21 * 3600,))
     cycle("21 h idle -> maintenance repay", "maintenance_repay")
     # Crash: HF < 1.3 -> emergency repay of all USDT on hand.
-    set_price(m["vBNB"], target_price * 60 // 100)
+    set_bnb_price(m["vBNB"], target_price * 60 // 100)
     out = cycle("BNB -40% -> emergency repay all USDT on hand", "emergency_repay")
     s, _ = k.state()
     assert s.usdt_wallet < Decimal("0.000001")

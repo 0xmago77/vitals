@@ -50,6 +50,32 @@ def recent_borrowers(pool, cfg, want: int, window: int = 1000, max_windows: int 
     head = pool.block_number()
     seen: list[str] = []
     to_block = head
+    # Cheapest first: one market at a time (public nodes refuse multi-address filters), busiest
+    # markets first, 2000-block windows walking back from the head.
+    syms = multicall(pool, cfg.multicall, [Call(m, "symbol()", (), ("string",)) for m in markets], "latest")
+    by_sym = {x.value[0]: m for m, x in zip(markets, syms) if x.success}
+    busiest = [by_sym[s] for s in ("vUSDT", "vUSDC", "vBNB", "vBTC", "vETH", "vFDUSD", "vWBNB") if s in by_sym]
+    from vitals.rpc import RpcPool
+
+    logs_pool = RpcPool(cfg.rpc_logs, timeout=20, retries=1)
+    for market in busiest:
+        end = head
+        for _ in range(8):
+            try:
+                logs = logs_pool.get_logs_range(market, [BORROW_TOPIC], end - 1999, end, window=2000, min_window=25)
+            except Exception as exc:
+                print(f"{market}: getLogs failed ({str(exc)[:60]})", file=sys.stderr)
+                break
+            for log in reversed(logs):
+                who = to_checksum_address("0x" + log["data"][2 + 24 : 2 + 64])
+                if who != CASE and who not in seen:
+                    seen.append(who)
+            end -= 2000
+            if len(seen) >= want * 2:
+                print(f"{len(seen)} borrowers from Borrow events (single-market log queries)", file=sys.stderr)
+                return seen
+    if len(seen) >= want:
+        return seen
     try:
         for _ in range(max_windows):
             frm = to_block - window + 1
@@ -133,6 +159,7 @@ def main() -> int:
     rows = []
     for block in (124010796, 122829508):
         rows.append({"group": "case", **check(pool, cfg, CASE, block)})
+        print(f"case block {block}: matches={rows[-1]['matches']}", file=sys.stderr, flush=True)
     borrowers = recent_borrowers(pool, cfg, args.count)
     done = 0
     for acct in borrowers:
@@ -146,6 +173,7 @@ def main() -> int:
         if row["debtUsd"] <= 0:
             continue
         rows.append({"group": "recent-borrower", **row})
+        print(f"{acct}: matches={row['matches']} hf={row['hf']}", file=sys.stderr, flush=True)
         done += 1
     print(f"{'group':16} {'account':44} {'block':>10} {'HF(CF)':>10} {'HF(LT)':>10} {'relLiqLT':>10} {'relBpCF':>10} ok  CF!=LT  markets")
     for r in rows:

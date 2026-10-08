@@ -13,7 +13,7 @@
 #   * /etc/vitals        root:vitals 0750; vitals.env is created from
 #                        .env.example only when it does not exist yet
 #   * /etc/vitals/wallet.key is never created, copied or read: if it exists,
-#                        only its owner and mode are set (root:vitals 0640)
+#                        only its owner is set and its mode tightened if needed (0440 or 0640 kept)
 #   * /etc/systemd/system/vitals.service, enabled and (re)started
 # Caddy, the firewall and every other service are left alone.
 set -euo pipefail
@@ -86,7 +86,12 @@ fi
 
 mkdir -p "$APP_DIR" "$DATA_DIR" "$ETC_DIR"
 chown root:root "$APP_DIR";               chmod 0755 "$APP_DIR"
-chown -R "$SVC_USER:$SVC_USER" "$DATA_DIR"; chmod 0750 "$DATA_DIR"   # -R: files a root CLI run may have left
+chown "$SVC_USER:$SVC_USER" "$DATA_DIR"; chmod 0750 "$DATA_DIR"
+# Only Vitals' own state is re-owned (a root CLI run may have created it); other files the
+# operator keeps here (for example hires.jsonl) are left exactly as they are.
+for own in "$DATA_DIR"/vitals.sqlite3 "$DATA_DIR"/vitals.sqlite3-wal "$DATA_DIR"/vitals.sqlite3-shm "$DATA_DIR"/deliverables; do
+  if [[ -e $own ]]; then chown -R "$SVC_USER:$SVC_USER" "$own"; fi
+done
 chown root:"$SVC_USER" "$ETC_DIR";        chmod 0750 "$ETC_DIR"
 
 # ------------------------------------------------------------------- code
@@ -171,10 +176,14 @@ if [[ -L $KEY_FILE ]]; then
   key_state="symlink, left untouched"
   warn "$KEY_FILE is a symlink; replace it with a regular file owned root:$SVC_USER, mode 0640"
 elif [[ -f $KEY_FILE ]]; then
-  chown root:"$SVC_USER" "$KEY_FILE"; chmod 0640 "$KEY_FILE"
-  key_state="present, root:$SVC_USER 0640"
+  # Never rewrite the key. Only tighten metadata when the service could not read it or
+  # others could: an operator's 0440 or 0640 root:vitals is kept exactly as it is.
+  key_mode=$(stat -c '%a' "$KEY_FILE"); key_owner=$(stat -c '%U:%G' "$KEY_FILE")
+  if [[ $key_owner != "root:$SVC_USER" ]]; then chown root:"$SVC_USER" "$KEY_FILE"; fi
+  if [[ $key_mode != 440 && $key_mode != 640 ]]; then chmod 0440 "$KEY_FILE"; fi
+  key_state="present, $(stat -c '%U:%G %a' "$KEY_FILE")"
 else
-  warn "$KEY_FILE is missing: the operator places it (root:$SVC_USER 0640); no script ever writes it"
+  warn "$KEY_FILE is missing: the operator places it (root:$SVC_USER 0440 or 0640); no script ever writes it"
 fi
 
 # --------------------------------------------------------------- service
@@ -241,7 +250,7 @@ if [[ $env_created == 1 ]]; then
   echo "  * EDIT $ENV_FILE now (sudoedit). The template is a dry run with the keeper off."
 fi
 if [[ $key_state == missing ]]; then
-  echo "  * Place the agent wallet key at $KEY_FILE (root:$SVC_USER 0640), then re-run this installer."
+  echo "  * Place the agent wallet key at $KEY_FILE (root:$SVC_USER 0440), then re-run this installer."
 fi
 cat <<'EOF'
   1. Helper for one-off commands with the service environment (paste into your shell;
