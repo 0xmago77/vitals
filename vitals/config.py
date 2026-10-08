@@ -35,6 +35,8 @@ DEFAULT_HEAD_RPCS = (
     "https://bsc-mainnet.public.blastapi.io"
 )
 DEFAULT_ARCHIVE_RPCS = "https://bsc-mainnet.public.blastapi.io,https://1rpc.io/bnb"
+# eth_getLogs: bsc-dataseed refuses it, 1rpc caps the range at 50 blocks, publicnode serves 5000.
+DEFAULT_LOGS_RPCS = "https://bsc-rpc.publicnode.com,https://1rpc.io/bnb,https://bsc-mainnet.public.blastapi.io"
 
 
 def _env(name: str, default: str) -> str:
@@ -69,6 +71,7 @@ class Config:
 
     rpc_head: list[str] = field(default_factory=lambda: DEFAULT_HEAD_RPCS.split(","))
     rpc_archive: list[str] = field(default_factory=lambda: DEFAULT_ARCHIVE_RPCS.split(","))
+    rpc_logs: list[str] = field(default_factory=lambda: DEFAULT_LOGS_RPCS.split(","))
     rpc_write: list[str] = field(default_factory=list)
     rpc_timeout: float = 10.0
     rpc_retries: int = 2
@@ -93,6 +96,7 @@ class Config:
     watch_enabled: bool = True
     watch_interval: float = 15.0
     watch_from_block: int | None = None
+    watch_from_job: int | None = None
     log_window: int = 5000
     auto_settle: bool = True
 
@@ -148,6 +152,7 @@ class Config:
         agent = load_agent_file()
         agent_id_raw = _env("VITALS_AGENT_ID", "" if agent.get("agentId") is None else str(agent["agentId"]))
         from_block = _env("VITALS_WATCH_FROM_BLOCK", "")
+        from_job = _env("VITALS_WATCH_FROM_JOB", "")
         dec = lambda name, default: Decimal(_env(name, default))  # noqa: E731
         return cls(
             base_url=_env("VITALS_BASE_URL", "https://vitals.43-165-190-110.sslip.io").rstrip("/"),
@@ -159,6 +164,7 @@ class Config:
             chain_id=int(_env("VITALS_CHAIN_ID", "56")),
             rpc_head=_env_list("VITALS_RPC_HEAD", DEFAULT_HEAD_RPCS),
             rpc_archive=_env_list("VITALS_RPC_ARCHIVE", DEFAULT_ARCHIVE_RPCS),
+            rpc_logs=_env_list("VITALS_RPC_LOGS", DEFAULT_LOGS_RPCS),
             rpc_write=_env_list("VITALS_RPC_WRITE", _env("VITALS_RPC_HEAD", DEFAULT_HEAD_RPCS)),
             rpc_timeout=float(_env("VITALS_RPC_TIMEOUT", "10")),
             rpc_retries=int(_env("VITALS_RPC_RETRIES", "2")),
@@ -179,6 +185,7 @@ class Config:
             watch_enabled=_env_bool("VITALS_WATCH", True),
             watch_interval=float(_env("VITALS_WATCH_INTERVAL", "15")),
             watch_from_block=int(from_block) if from_block.isdigit() else None,
+            watch_from_job=int(from_job) if from_job.isdigit() else None,
             log_window=int(_env("VITALS_LOG_WINDOW", "5000")),
             auto_settle=_env_bool("VITALS_AUTO_SETTLE", True),
             keeper_enabled=_env_bool("VITALS_KEEPER"),

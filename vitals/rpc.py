@@ -77,6 +77,7 @@ class RpcPool:
         head: list[str],
         archive: list[str] | None = None,
         *,
+        logs: list[str] | None = None,
         timeout: float = 10.0,
         retries: int = 2,
         cooldown: float = 30.0,
@@ -86,6 +87,7 @@ class RpcPool:
         self._pools = {
             "head": [_Endpoint(u) for u in head],
             "archive": [_Endpoint(u) for u in (archive or head)],
+            "logs": [_Endpoint(u) for u in (logs or head)],
         }
         self.timeout = timeout
         self.retries = max(0, retries)
@@ -109,6 +111,9 @@ class RpcPool:
         if purpose == "archive":
             primary = self._pools["archive"]
             secondary = [e for e in self._pools["head"] if e.url not in {p.url for p in primary}]
+        elif purpose == "logs":
+            primary = self._pools["logs"]
+            secondary = []
         else:
             primary = self._pools["head"]
             secondary = [e for e in self._pools["archive"] if e.url not in {p.url for p in primary}]
@@ -218,10 +223,31 @@ class RpcPool:
             raise RpcUnavailable(f"block {block} not found")
         return res
 
-    def get_logs(self, address: str, topics: list, from_block: int, to_block: int, *,
-                 purpose: str = "head") -> list[dict]:
+    def get_logs(self, address: str | list[str], topics: list, from_block: int, to_block: int, *,
+                 purpose: str = "logs") -> list[dict]:
         params = [{"address": address, "topics": topics, "fromBlock": hex(from_block), "toBlock": hex(to_block)}]
         return self.call("eth_getLogs", params, purpose=purpose)
+
+    def get_logs_range(self, address: str | list[str], topics: list, from_block: int, to_block: int, *,
+                       window: int = 5000, min_window: int = 25) -> list[dict]:
+        """eth_getLogs over [from_block, to_block] in windows that shrink when a node
+        refuses the range (public BSC nodes cap it anywhere from 50 to 10000 blocks)."""
+        out: list[dict] = []
+        start = from_block
+        win = max(min_window, window)
+        while start <= to_block:
+            end = min(to_block, start + win - 1)
+            try:
+                out.extend(self.get_logs(address, topics, start, end))
+            except (RpcError, RpcUnavailable):
+                if win <= min_window:
+                    raise
+                win = max(min_window, win // 4)
+                continue
+            start = end + 1
+            if win < window:
+                win = min(window, win * 2)
+        return out
 
     def hosts(self) -> dict[str, list[str]]:
         return {k: [e.host for e in v] for k, v in self._pools.items()}
@@ -232,4 +258,5 @@ class _Transient(Exception):
 
 
 def pool_from_config(cfg) -> RpcPool:
-    return RpcPool(cfg.rpc_head, cfg.rpc_archive, timeout=cfg.rpc_timeout, retries=cfg.rpc_retries)
+    return RpcPool(cfg.rpc_head, cfg.rpc_archive, logs=cfg.rpc_logs, timeout=cfg.rpc_timeout,
+                   retries=cfg.rpc_retries)
