@@ -109,14 +109,15 @@ curl -s https://vitals.43-165-190-110.sslip.io/mcp -H 'content-type: application
 ## How results can be verified
 
 - **Every number is on chain at one block.** The report names its block, the Comptroller, the oracle and the RPC host. Re-run the same reads (`getAssetsIn`, `getAccountSnapshot`, `markets`, `oracle().getUnderlyingPrice`) at that block, or run `python -m vitals report <address> --block <N>` from this repository.
-- **Reconciliation.** `reconciliation.relativeDiffCollateralFactor` compares `sum(collateralUSD * CF) - sum(debtUSD)` with `getAccountLiquidity(account)` at the same block; Vitals reports `matches: true` only within 1e-9.
+- **Reconciliation.** At the same block, `sum(collateralUSD * LT) - debt` must equal `getAccountLiquidity` (liquidity minus shortfall) and `sum(collateralUSD * CF) - debt` must equal `getBorrowingPower`; the relative differences are in `reconciliation` and `matches: true` means both are within 1e-9.
 - **Deliverables.** A paid job's `deliverable` (bytes32 on AgenticCommerce) is the keccak256 of the file at `/deliverables/<hash>.json`; the URL is also in the `submit` transaction's `optParams`. Fetch the file, hash its bytes, compare.
 - **Quotes.** `negotiation_hash` is keccak256 of the canonical quote JSON (bnbagent SDK schema v1) and `provider_sig` recovers to the agent wallet.
 - **Conformance.** `scripts/marque_check.py` replays Marque's MCS-HF-1 harness (A2A and MCP) against any Vitals URL; `scripts/diff_reference.py` diffs Vitals against Marque's reference agent field by field.
 
 ### Definitions
 
-- `healthFactor = sum(collateralUSD * collateralFactor) / sum(debtUSD)` over the markets the account has entered (VAI debt at 1 USD), as `getAccountLiquidity` and MCS-HF-1 use. No debt: `healthFactor` is `null` with `status: "no_debt"`.
+- `healthFactor = sum(collateralUSD * collateralFactor) / sum(debtUSD)` over the markets the account has entered (VAI debt at 1 USD): the MCS-HF-1 definition, and the one `Comptroller.getBorrowingPower` uses. No debt: `healthFactor` is `null` with `status: "no_debt"`.
+- Venus liquidates on liquidation thresholds: `healthFactorLiquidationThreshold = sum(collateralUSD * liquidationThreshold) / sum(debtUSD)`, which is what `Comptroller.getAccountLiquidity` reconciles with (measured on BSC for accounts whose collateral has CF ≠ LT, e.g. LINK with CF 0 and LT 0.63). `liquidityUsd`, `shortfallUsd`, `distanceToLiquidationPct` and `markets[].liquidationPriceLiquidationThreshold` follow that rule; `borrowingPowerUsd` and `distanceToHealthFactorOnePct` follow the collateral factors. Both reconciliations must hold to 1e-9 for `reconciliation.matches` to be true.
 - `primaryCollateralSymbol`: the underlying symbol of the entered market with the largest supplied USD among markets with a positive collateral factor (vBNB is `BNB`).
 - `markets[].liquidationPrice`: `P* = P - L0 / (a*CF - b)` with `L0 = sum(a_k P_k CF_k) - sum(b_k P_k)`; `null` when no positive price brings HF to 1. `primaryLiquidationPriceUsd` follows MCS-HF-1 (debt USD held fixed); the two agree unless the primary collateral is also borrowed.
 
