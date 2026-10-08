@@ -54,7 +54,7 @@ class HFService:
         else:
             report["assumptions"] = []
         if key is not None:
-            self._store(key, report)
+            self._store(key, dict(report))  # callers (the seller) add fields to what they get back
         self.served += 1
         return report
 

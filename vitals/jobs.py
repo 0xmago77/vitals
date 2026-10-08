@@ -53,6 +53,12 @@ def transition(current: str, new: str) -> str:
 
 def from_chain(current: str | None, chain_status: int) -> str:
     """The local state implied by an on-chain status, given what we believed."""
+    # On-chain status only moves forward, so a status behind what we already
+    # recorded comes from a lagging node: it must not reopen a job.
+    if current in ("completed", "rejected", "expired"):
+        return current
+    if current in ("submitted", "settling") and chain_status in (OPEN, FUNDED):
+        return current
     if chain_status == COMPLETED:
         return "completed"
     if chain_status == REJECTED:

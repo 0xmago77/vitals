@@ -1,0 +1,63 @@
+# Caddy site block for Vitals. It replaces the existing
+# vitals.43-165-190-110.sslip.io block in /etc/caddy/Caddyfile (paste it in,
+# or `import /opt/vitals/deploy/Caddyfile.vitals` in its place; two blocks
+# for the same host are an error). Then:
+#   caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+#
+# HTTP -> HTTPS: nothing to configure. A site address without a scheme gets
+# Caddy's automatic HTTPS, which serves the Let's Encrypt certificate on :443
+# and answers plain http:// on :80 with a permanent redirect to https://
+# (port 80 must stay open for that and for ACME renewals).
+#
+# Forwarded headers: reverse_proxy passes Host through and sets
+# X-Forwarded-For (the real client IP; client-supplied values are not
+# trusted), X-Forwarded-Proto and X-Forwarded-Host by default. Vitals reads
+# the client IP from X-Forwarded-For only when the peer is 127.0.0.1, which
+# feeds its per-IP rate limit. No header_up lines are needed.
+
+vitals.43-165-190-110.sslip.io {
+	encode zstd gzip
+
+	# Vitals accepts JSON-RPC bodies up to 256 KiB (aiohttp client_max_size).
+	request_body {
+		max_size 256KiB
+	}
+
+	# Safe for JSON APIs: no CSP, COEP or CORP here, and no CORS headers are
+	# added or removed. The agent card and registration file carry
+	# Access-Control-Allow-Origin: * from the app itself.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:9000 {
+		# During a service restart (RestartSec=5) hold requests and retry the
+		# dial instead of failing at once. Only connection failures are
+		# retried, so a POST is never sent twice.
+		lb_try_duration 10s
+		lb_try_interval 250ms
+	}
+
+	# Upstream down: answer JSON instead of an empty 502. Other errors (413,
+	# for example) keep their own status.
+	handle_errors {
+		@upstream_down expression `{err.status_code} in [502, 503, 504]`
+		handle @upstream_down {
+			header Content-Type "application/json"
+			header Retry-After "10"
+			respond `{"agent":"Vitals","status":"unavailable","detail":"service restarting or down, retry shortly"}` 503
+		}
+	}
+
+	# Optional access log (the directory must exist and be writable by caddy):
+	# log {
+	# 	output file /var/log/caddy/vitals.access.log {
+	# 		roll_size 10MiB
+	# 		roll_keep 5
+	# 	}
+	# }
+}

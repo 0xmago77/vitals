@@ -33,7 +33,7 @@ def agent_card(cfg, *, agent_id: int | None = None, provider_address: str | None
     agent_id = cfg.agent_id if agent_id is None else agent_id
     provider_address = provider_address or cfg.owner
     price = price_atomic(cfg)
-    hf_example_data = json.dumps({"address": EXAMPLE_ADDRESS, "blockNumber": 124010796, "targetHealthFactor": 2.5})
+    hf_example_data = json.dumps({"address": EXAMPLE_ADDRESS, "targetHealthFactor": 2.5})
     hf_example_text = (f"Account: {EXAMPLE_ADDRESS}. Report its Venus health factor and the USD of debt to repay "
                        "to restore a health factor of 2.5.")
     registry = f"eip155:{cfg.chain_id}:{cfg.identity_registry}"
@@ -78,7 +78,8 @@ def agent_card(cfg, *, agent_id: int | None = None, provider_address: str | None
                     "\"...\"}} and receive the bnbagent-SDK NegotiationResult: a quote signed (EIP-191) by the "
                     f"agent wallet {provider_address}, {price} base units of U "
                     f"({cfg.payment_token}) on BNB Smart Chain, valid {cfg.quote_ttl} s, bound to chain "
-                    f"{cfg.chain_id} and AgenticCommerce {cfg.commerce}. Put the description built from it "
+                    f"{cfg.chain_id} and AgenticCommerce {cfg.commerce}. Fund within 15 minutes of the quote. "
+                    "Put the description built from it "
                     "into createJob (evaluator = hook = EvaluatorRouter), register the OptimisticPolicy, "
                     "setBudget, fund: Vitals delivers automatically."
                 ),
@@ -123,8 +124,9 @@ def agent_card(cfg, *, agent_id: int | None = None, provider_address: str | None
         ],
         # Fields read by marketplaces and indexers beyond the A2A core.
         "category": CATEGORY,
-        "categories": [CATEGORY],
-        "tags": [CATEGORY, "health factor", "venus", "liquidation", "bnb-chain", "erc8183", "erc8004"],
+        "categories": [CATEGORY, "health-factor"],
+        "tags": [CATEGORY, "health-factor", "health factor", "venus", "liquidation", "bnb-chain", "erc8183", "erc8004"],
+        "agentWallet": provider_address,
         "pricing": {
             "model": "per_job",
             "amount": str(cfg.price_u),
@@ -186,6 +188,8 @@ def registration_file(cfg, *, agent_id: int | None = None) -> dict[str, Any]:
         ),
         "supportedTrust": ["reputation"],
         "category": CATEGORY,
-        "tags": [CATEGORY, "venus", "bnb-chain"],
+        "categories": [CATEGORY, "health-factor"],
+        "tags": [CATEGORY, "health-factor", "venus", "bnb-chain"],
+        "agentWallet": cfg.owner,
     }
     return reg

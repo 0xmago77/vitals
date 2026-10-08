@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 import threading
 import time
@@ -58,17 +59,55 @@ def decode_job(raw: bytes) -> dict:
             "status": t[7], "hook": to_checksum_address(t[8]), "submittedAt": t[9], "deliverable": "0x" + t[10].hex()}
 
 
-def task_text_from_description(description: str) -> str:
-    """The buyer's task as anchored in job.description (SDK schema v1 JSON or plain text)."""
+ADDRESS_IN_TEXT = re.compile(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])")
+TASK_KEYS = ("task", "task_description", "prompt", "query", "message", "description", "request")
+
+
+def classify_description(description: str) -> dict:
+    """What a job.description carries.
+
+    kind "sdk":      bnbagent schema v1 (flat signed content + negotiation_hash + provider_sig)
+    kind "envelope": a whole NegotiationResult {request, response, negotiation_hash, ...} (Dolphin)
+    kind "other":    any other JSON envelope or plain text
+    """
     d = (description or "").strip()
+    obj = None
     if d.startswith("{"):
         try:
             obj = json.loads(d)
-            if isinstance(obj, dict) and isinstance(obj.get("task"), str):
-                return obj["task"]
         except ValueError:
-            pass
-    return d
+            obj = None
+    if isinstance(obj, dict):
+        if isinstance(obj.get("request"), dict) and isinstance(obj.get("response"), dict) and "negotiation_hash" in obj:
+            return {"kind": "envelope", "task": str(obj["request"].get("task_description") or ""), "envelope": obj}
+        if "negotiation_hash" in obj and "version" in obj and "price" in obj and isinstance(obj.get("task"), str):
+            return {"kind": "sdk", "task": obj["task"], "envelope": obj}
+        return {"kind": "other", "task": _task_text(obj) or d, "envelope": None}
+    return {"kind": "other", "task": d, "envelope": None}
+
+
+def _task_text(obj: Any, depth: int = 0) -> str | None:
+    if depth > 3:
+        return None
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        for k in TASK_KEYS:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+            if isinstance(v, dict):
+                found = _task_text(v, depth + 1)
+                if found:
+                    return found
+        # Keep the whole object as text so addresses and numbers in it can still be read.
+        return json.dumps(obj, separators=(",", ":"))
+    return None
+
+
+def task_text_from_description(description: str) -> str:
+    """The buyer's task as anchored in job.description (any of the formats above)."""
+    return classify_description(description)["task"]
 
 
 class Seller:
@@ -141,7 +180,9 @@ class Seller:
 
     @staticmethod
     def _rejection(request: dict, code: str, reason: str) -> dict:
-        return {"request": request, "request_hash": "",
+        # An empty negotiation_hash is what lets Marque's quote reader see a decline (and retry
+        # with the card's own JSON example) instead of "no quote in the response".
+        return {"request": request, "request_hash": "", "negotiation_hash": "",
                 "response": {"accepted": False, "reason_code": code, "reason": reason}, "response_hash": ""}
 
     def negotiate(self, data: dict, client: str = "unknown") -> dict:
@@ -373,31 +414,45 @@ class Seller:
                 problems.append("payment token is not U")
             if int(job["budget"]) < self.price:
                 problems.append(f"budget {job['budget']} is below the quoted price {self.price}")
+            if int(job["expiredAt"]) - self.dispute_window() <= int(time.time()):
+                problems.append("submission deadline passed (expiredAt - disputeWindow): the policy would revert")
             if problems:
                 self._fail(job_id, "; ".join(problems), permanent=True)
                 return {"ok": False, "reason": problems}
-            _, ops, _ = self.sdk()
-            verdict = asyncio.run(ops.verify_job(job_id))
-            if not verdict.get("valid"):
-                self._fail(job_id, f"SDK verify_job: {verdict.get('error')}",
-                           permanent=verdict.get("error_code") in PERMANENT_CODES and not verdict.get("retryable"))
-                return {"ok": False, "reason": verdict.get("error")}
-            try:
-                task = parse_task(task_text_from_description(job["description"]))
-            except TaskError as exc:
-                self._fail(job_id, f"task unreadable: {exc}", permanent=True)
-                return {"ok": False, "reason": str(exc)}
+            client, ops, _ = self.sdk()
+            desc = classify_description(job["description"])
+            quote_check = self.check_own_quote(desc)
+            path = "sdk"
+            if desc["kind"] == "sdk":
+                verdict = asyncio.run(ops.verify_job(job_id))
+                if not verdict.get("valid"):
+                    if verdict.get("retryable"):
+                        self._fail(job_id, f"SDK verify_job: {verdict.get('error')}", permanent=False)
+                        return {"ok": False, "reason": verdict.get("error")}
+                    # The SDK refuses quotes funded after their 900 s window. Our price is fixed and
+                    # the on-chain checks above passed, so a late-funded job is still delivered.
+                    path = "direct"
+                    quote_check["sdkVerify"] = verdict.get("error")
+            else:
+                # Not the SDK schema (a NegotiationResult envelope, a marketplace envelope or plain
+                # text): the SDK cannot verify it, the on-chain checks above are what matter.
+                path = "direct"
+            task = self.task_for(desc["task"], job)
             report = self.hf.report_for(task)
             report["job"] = {"jobId": job_id, "chainId": self.cfg.chain_id, "commerce": self.cfg.commerce,
                              "client": job["client"], "provider": job["provider"], "budget": str(job["budget"]),
-                             "token": self.cfg.payment_token}
+                             "token": self.cfg.payment_token, "descriptionKind": desc["kind"], "quote": quote_check}
             self.guard.check(self.address, 400_000)
             content = json.dumps(report, separators=(",", ":"), allow_nan=False)
-            res = asyncio.run(ops.submit_result(job_id, content, metadata={
+            metadata = {
                 "job_id": job_id, "generator": f"{ENGINE_NAME} {ENGINE_VERSION}", "account": task.address,
                 "blockNumber": report.get("blockNumber"), "content_type": "application/json",
                 "built_with": "https://github.com/bnb-chain/bnbagent-sdk",
-            }))
+            }
+            if path == "sdk":
+                res = asyncio.run(ops.submit_result(job_id, content, metadata=metadata))
+            else:
+                res = self.submit_direct(client, job_id, content, metadata)
             if not res.get("success"):
                 self._fail(job_id, f"submit failed: {res.get('error')}",
                            permanent=res.get("error_code") in PERMANENT_CODES)
@@ -414,6 +469,74 @@ class Seller:
             log.exception("delivery of job %s failed", job_id)
             self._fail(job_id, f"{type(exc).__name__}: {exc}", permanent=False)
             return {"ok": False, "reason": str(exc)}
+
+    def task_for(self, text: str, job: dict):
+        """Parse the buyer's task; with no address in it, report on the job client's own wallet."""
+        try:
+            return parse_task(text)
+        except TaskError as exc:
+            found = ADDRESS_IN_TEXT.findall(text or "")
+            addr = found[0] if found else job["client"]
+            task = parse_task(None, {"address": addr})
+            task.warnings.append(
+                f"task could not be fully read ({exc}); reporting on "
+                + ("the address it names" if found else "the job client's own wallet") + " with defaults")
+            task.sources["address"] = "task text" if found else "job.client"
+            return task
+
+    def check_own_quote(self, desc: dict) -> dict:
+        """Was the quote carried by this job signed by this agent? (informational for non-SDK formats)."""
+        env = desc.get("envelope")
+        out: dict[str, Any] = {"present": env is not None}
+        if env is None:
+            return out
+        try:
+            from bnbagent.erc8183.negotiation import _build_description_content
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+
+            if desc["kind"] == "envelope":
+                content = _build_description_content(env, chain_id=env.get("chain_id"),
+                                                     verifying_contract=env.get("verifying_contract"))
+            else:
+                content = {k: v for k, v in env.items() if k not in ("negotiation_hash", "provider_sig")}
+            recomputed = "0x" + keccak(text=json.dumps(content, sort_keys=True, separators=(",", ":"))).hex()
+            nh = str(env.get("negotiation_hash", ""))
+            signer = Account.recover_message(encode_defunct(text=nh), signature=env.get("provider_sig"))
+            out.update({
+                "hashMatches": recomputed.lower() == nh.lower(),
+                "signedByUs": signer.lower() == self.address.lower(),
+                "issuedHere": self.db.quote(nh) is not None,
+                "price": content.get("price"),
+                "currency": content.get("currency"),
+            })
+        except Exception as exc:
+            out["error"] = f"{type(exc).__name__}"
+        return out
+
+    def submit_direct(self, client, job_id: int, content: str, metadata: dict) -> dict:
+        """Build the SDK DeliverableManifest, store it content-addressed, and submit its hash
+        with the SDK client (the path for job descriptions the SDK cannot verify)."""
+        from bnbagent.erc8183.schema import SCHEMA_VERSION, DeliverableManifest
+
+        try:
+            manifest = DeliverableManifest(
+                version=SCHEMA_VERSION, job_id=job_id, chain_id=self.cfg.chain_id,
+                contracts={"commerce": client.commerce.address, "router": client.router.address,
+                           "policy": client.policy.address},
+                response={"content": content, "content_type": "text/plain"},
+                metadata=metadata,
+            )
+            digest = manifest.manifest_hash()
+            h, url = self.store.put(manifest.to_dict())
+            if h.lower() != "0x" + digest.hex().lower().removeprefix("0x"):
+                raise RuntimeError("stored deliverable hash differs from the manifest hash")
+            res = client.submit(job_id, digest, {"deliverable_url": url})
+            tx = res.get("transactionHash")
+            tx = tx if isinstance(tx, str) else ("0x" + bytes(tx).hex() if tx is not None else None)
+            return {"success": True, "txHash": tx, "deliverableUrl": url, "deliverable": h}
+        except Exception as exc:
+            return {"success": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
     # --------------------------------------------------------------- settle
 

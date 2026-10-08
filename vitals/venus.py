@@ -399,14 +399,14 @@ def _f(x: Decimal | None, places: int | None = None) -> float | None:
     if x is None:
         return None
     if places is not None:
-        x = x.quantize(Decimal(1).scaleb(-places), rounding=decimal.ROUND_HALF_UP)
+        x = x.quantize(Decimal(1).scaleb(-places), rounding=decimal.ROUND_HALF_UP, context=CTX)
     return float(x)
 
 
 def _s(x: Decimal | None) -> str | None:
     if x is None:
         return None
-    return format(x.quantize(Decimal("1e-18"), rounding=decimal.ROUND_HALF_EVEN).normalize(), "f")
+    return format(x.quantize(Decimal("1e-18"), rounding=decimal.ROUND_HALF_EVEN, context=CTX).normalize(CTX), "f")
 
 
 def build_report(calc: Calc, target: Decimal, *, cfg=None, inputs: dict | None = None,

@@ -38,7 +38,7 @@ class ContentStore(StorageProvider):
         self.base_url = base_url.rstrip("/")
 
     def path_for(self, h: str) -> Path:
-        if not HASH_RE.match(h):
+        if not HASH_RE.fullmatch(h):  # match() would accept a trailing newline
             raise ValueError("not a deliverable hash")
         return self.dir / f"{h}.json"
 

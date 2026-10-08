@@ -1,0 +1,77 @@
+# Vitals: one process serving A2A, MCP, REST, the agent card and the status
+# page on 127.0.0.1:9000 (Caddy terminates TLS in front), plus the ERC-8183
+# watcher and the keeper. Installed by deploy/install.sh to
+# /etc/systemd/system/vitals.service.
+#
+# Files the service reads:   /opt/vitals (code, venv; read-only)
+#                            /etc/vitals/vitals.env    root:vitals 0640
+#                            /etc/vitals/wallet.key    root:vitals 0640
+# The only writable path:    /var/lib/vitals           vitals:vitals 0750
+
+[Unit]
+Description=Vitals: Venus health-factor agent (A2A, MCP, ERC-8183, keeper)
+Documentation=https://github.com/0xmago77/vitals
+Wants=network-online.target
+After=network-online.target
+# Keep restarting for as long as it takes; never give up after a burst.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=vitals
+Group=vitals
+WorkingDirectory=/opt/vitals
+# The package runs from the source tree (python -m vitals with this working
+# directory), so config/agent.json resolves to /opt/vitals/config/agent.json.
+Environment=PYTHONPATH=/opt/vitals
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=VITALS_DATA_DIR=/var/lib/vitals
+# Values in this file override the Environment= lines above. Keep
+# VITALS_DATA_DIR=/var/lib/vitals there: it is the only writable path.
+EnvironmentFile=/etc/vitals/vitals.env
+ExecStart=/opt/vitals/.venv/bin/python -m vitals serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+SyslogIdentifier=vitals
+
+# Resources
+MemoryMax=512M
+TasksMax=256
+LimitNOFILE=8192
+
+# Filesystem
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/vitals
+
+# Privileges (port 9000 needs no capability)
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+# Kernel and process isolation
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_NETLINK is kept for glibc getaddrinfo (address-family probing).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
