@@ -155,6 +155,19 @@ USDT on hand when HF < 1.3, and otherwise makes a maintenance repay (accrued
 interest plus at least 0.01 USDT) when it has not transacted for 20 hours.
 Limits: 3 USDT per borrow, 5 USDT total debt.
 
+## Credits
+
+| Library / source | Use | License |
+|---|---|---|
+| [bnbagent-sdk](https://github.com/bnb-chain/bnbagent-sdk) 0.5.0 | ERC-8004 identity and ERC-8183 job flow | MIT |
+| [web3.py](https://github.com/ethereum/web3.py), [eth-abi / eth-account / eth-utils](https://github.com/ethereum) | RPC, ABI encoding, signing | MIT |
+| [Pydantic](https://github.com/pydantic/pydantic) | data models | MIT |
+| [Requests](https://github.com/psf/requests) | HTTP | Apache-2.0 |
+| [pytest](https://github.com/pytest-dev/pytest) | tests | MIT |
+| [Venus Protocol](https://github.com/VenusProtocol/venus-protocol) | the Comptroller and vToken contracts Vitals reads; health-factor math follows them | BSD-3-Clause (their code is read on chain, not copied) |
+| [Multicall3](https://github.com/mds1/multicall) | batched reads (`aggregate3`) | MIT |
+| Public BSC RPCs listed in `vitals/config.py` | chain reads | each provider's terms |
+
 ## License
 
 MIT, see `LICENSE`.
