@@ -6,7 +6,7 @@
 #
 #   --base URL     local service      (default http://127.0.0.1:${VITALS_PORT:-9000})
 #   --public URL   public site, for the card check and TLS expiry
-#                                     (default ${VITALS_BASE_URL:-https://vitals.43-165-190-110.sslip.io})
+#                                     (default ${VITALS_BASE_URL:-https://vitals.62-171-148-149.sslip.io})
 # Optional env: VITALS_STATUS_RPC (BSC JSON-RPC for the balance, default
 # https://bsc-dataseed.bnbchain.org), VITALS_BNB_RESERVE (default 0.002).
 # Needs curl and jq; openssl for the certificate line. Exit 0 when /health is ok.
@@ -14,7 +14,7 @@ set -u
 export LC_ALL=C
 
 BASE="http://127.0.0.1:${VITALS_PORT:-9000}"
-PUBLIC="${VITALS_BASE_URL:-https://vitals.43-165-190-110.sslip.io}"
+PUBLIC="${VITALS_BASE_URL:-https://vitals.62-171-148-149.sslip.io}"
 RPC="${VITALS_STATUS_RPC:-https://bsc-dataseed.bnbchain.org}"
 RESERVE="${VITALS_BNB_RESERVE:-0.002}"
 UNIT=vitals

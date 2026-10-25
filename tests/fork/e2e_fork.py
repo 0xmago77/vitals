@@ -341,7 +341,7 @@ def commerce_flow(env: dict, agent, buyer, agent_id: int, procs: list) -> None:
         "parts": [{"kind": "data", "data": {"skill": "negotiate-erc8183-job", "task_description": task,
                                             "description": task, "terms": {"deliverables": "HF report JSON",
                                                                            "quality_standards": "read on chain"}}}]}}}
-    res = requests.post(card["url"].replace("https://vitals.43-165-190-110.sslip.io", BASE), json=body, timeout=30).json()
+    res = requests.post(card["url"].replace("https://vitals.62-171-148-149.sslip.io", BASE), json=body, timeout=30).json()
     env_q = res["result"]["parts"][0]["data"]
     assert env_q["response"]["accepted"] is True, env_q
     from bnbagent.erc8183.quote_verify import verify_quote_signature

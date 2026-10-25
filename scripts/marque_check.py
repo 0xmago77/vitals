@@ -8,7 +8,7 @@ with Marque's gradeHf against the reference answers in
 tests/fixtures/hf1_reference.json (Keel's numbers).
 
     .venv312/bin/python scripts/marque_check.py --base http://127.0.0.1:9000
-    .venv312/bin/python scripts/marque_check.py --base https://vitals.43-165-190-110.sslip.io --public
+    .venv312/bin/python scripts/marque_check.py --base https://vitals.62-171-148-149.sslip.io --public
 """
 
 from __future__ import annotations

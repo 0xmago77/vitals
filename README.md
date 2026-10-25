@@ -26,8 +26,8 @@ over both A2A and MCP.
 Agent ID: 367904 · Chain: BNB Smart Chain mainnet (56) · Registry: 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 
 - Owner and agent wallet: `0x15A97307cAA68C24E4b5a0b83D331A6AA1EA195F`
-- Agent card: https://vitals.43-165-190-110.sslip.io/.well-known/agent-card.json
-- ERC-8004 registration file (the on-chain `agentURI`): https://vitals.43-165-190-110.sslip.io/.well-known/agent-registration.json
+- Agent card: https://vitals.62-171-148-149.sslip.io/.well-known/agent-card.json
+- ERC-8004 registration file (the on-chain `agentURI`): https://vitals.62-171-148-149.sslip.io/.well-known/agent-registration.json
 - Source: https://github.com/0xmago77/vitals
 - Listed on Marque: https://marque.trade/agents/56/367904 (health factor category; MCS-HF-1 passed live on 2026-10-08, conformance result 11265)
 - Listed on Mandate: https://www.mandatemarkets.com (category Health Factor Monitoring, listed 2026-10-08)
@@ -57,7 +57,7 @@ so the job reaches `JobCompleted` without anyone else acting.
 - **Mandate** (https://www.mandatemarkets.com): Vitals is discovered from the ERC-8004 registry through its `negotiate-erc8183-job` skill; hire it from its agent page with the account address as the task.
 - **Dolphin** (https://www.dolphinamp.xyz): listed automatically from the mainnet registry; hire it with a task that names the account address.
 - **Any ERC-8183 client** (for example the bnbagent SDK):
-  1. ask for a quote: A2A `message/send` to `https://vitals.43-165-190-110.sslip.io/a2a` with a data part
+  1. ask for a quote: A2A `message/send` to `https://vitals.62-171-148-149.sslip.io/a2a` with a data part
      `{"skill": "negotiate-erc8183-job", "task_description": "{\"address\": \"0x...\", \"targetHealthFactor\": 2.5}", "terms": {"deliverables": "...", "quality_standards": "..."}}`;
   2. `createJob(provider = agent wallet, evaluator = router, expiredAt >= now + 7 days + 1 h, description = build_job_description(quote), hook = router)`, `router.registerJob(jobId, OptimisticPolicy)`, `setBudget(jobId, price)`, approve U, `fund(jobId, price)`;
   3. optionally send `{"skill": "notify_funded", "job_id": N}`; the deliverable URL rides in the `submit` transaction and is listed at `/api/jobs/N`.
@@ -67,7 +67,7 @@ names no address is reported on the job client's own wallet.
 
 ## API reference
 
-Base URL: `https://vitals.43-165-190-110.sslip.io`. Every endpoint answers
+Base URL: `https://vitals.62-171-148-149.sslip.io`. Every endpoint answers
 `application/json`; a GET on a POST endpoint returns a JSON description of it.
 
 | Endpoint | Purpose |
@@ -86,7 +86,7 @@ Base URL: `https://vitals.43-165-190-110.sslip.io`. Every endpoint answers
 ### A2A example
 
 ```bash
-curl -s https://vitals.43-165-190-110.sslip.io/a2a -H 'content-type: application/json' -d '{
+curl -s https://vitals.62-171-148-149.sslip.io/a2a -H 'content-type: application/json' -d '{
   "jsonrpc": "2.0", "id": 1, "method": "message/send",
   "params": {"message": {"role": "user", "messageId": "m1", "parts": [{"kind": "text",
     "text": "Account: 0x60AA3AEE06E2345A17E4d4B12c53E046F4F63CAf\nBlock: 124010796\nReport the health factor and the exact USD of debt to repay to restore a health factor of 2.5"}]}}}'
@@ -103,7 +103,7 @@ adds `markets`, `repayToTarget`, `reconciliation`, `provenance` and the parsed
 ### MCP example
 
 ```bash
-curl -s https://vitals.43-165-190-110.sslip.io/mcp -H 'content-type: application/json' \
+curl -s https://vitals.62-171-148-149.sslip.io/mcp -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"venus_health_factor","arguments":{"address":"0x60AA3AEE06E2345A17E4d4B12c53E046F4F63CAf","blockNumber":124010796,"targetHealthFactor":2.5}}}'
 ```

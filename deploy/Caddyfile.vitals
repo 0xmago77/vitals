@@ -1,5 +1,5 @@
 # Caddy site block for Vitals. It replaces the existing
-# vitals.43-165-190-110.sslip.io block in /etc/caddy/Caddyfile (paste it in,
+# vitals.62-171-148-149.sslip.io block in /etc/caddy/Caddyfile (paste it in,
 # or `import /opt/vitals/deploy/Caddyfile.vitals` in its place; two blocks
 # for the same host are an error). Then:
 #   caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
@@ -15,7 +15,7 @@
 # the client IP from X-Forwarded-For only when the peer is 127.0.0.1, which
 # feeds its per-IP rate limit. No header_up lines are needed.
 
-vitals.43-165-190-110.sslip.io {
+vitals.62-171-148-149.sslip.io {
 	encode zstd gzip
 
 	# Vitals accepts JSON-RPC bodies up to 256 KiB (aiohttp client_max_size).

@@ -69,7 +69,7 @@ def load_agent_file(path: Path = AGENT_FILE) -> dict:
 
 @dataclass
 class Config:
-    base_url: str = "https://vitals.43-165-190-110.sslip.io"
+    base_url: str = "https://vitals.62-171-148-149.sslip.io"
     host: str = "127.0.0.1"
     port: int = 9000
     data_dir: Path = field(default_factory=lambda: REPO_ROOT / "data")
@@ -164,7 +164,7 @@ class Config:
         from_job = _env("VITALS_WATCH_FROM_JOB", "")
         dec = lambda name, default: Decimal(_env(name, default))  # noqa: E731
         return cls(
-            base_url=_env("VITALS_BASE_URL", "https://vitals.43-165-190-110.sslip.io").rstrip("/"),
+            base_url=_env("VITALS_BASE_URL", "https://vitals.62-171-148-149.sslip.io").rstrip("/"),
             host=_env("VITALS_HOST", "127.0.0.1"),
             port=int(_env("VITALS_PORT", "9000")),
             data_dir=Path(_env("VITALS_DATA_DIR", str(REPO_ROOT / "data"))),
